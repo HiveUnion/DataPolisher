@@ -116,7 +116,7 @@ def main() -> int:
     ]
 
     if use_apple_vision:
-        print("✓ Apple Vision OCR detected — skipping PaddlePaddle/PaddleOCR bundle.")
+        print("Apple Vision OCR detected -- skipping PaddlePaddle/PaddleOCR bundle.")
         # PyObjC frameworks are loaded dynamically; tell PyInstaller about them.
         cmd += [
             "--hidden-import=objc",
@@ -126,7 +126,7 @@ def main() -> int:
             "--collect-submodules=objc",
         ]
     else:
-        print("⚠ Apple Vision not available — bundling PaddleOCR (large).")
+        print("Apple Vision not available -- bundling PaddleOCR (large).")
         print("  To shrink the bundle: pip install pyobjc-framework-Vision pyobjc-framework-Quartz")
         cmd += [
             "--collect-all=paddleocr",
