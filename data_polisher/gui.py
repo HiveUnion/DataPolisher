@@ -24,13 +24,39 @@ PREVIEW_MAX_WIDTH = 380
 PREVIEW_MAX_HEIGHT = 700
 
 
-def fit_preview(image: Image.Image) -> Image.Image:
+def _display_scale(widget) -> float:
+    """Return the HiDPI scale factor (e.g. 2.0 on Retina) for *widget*."""
+    try:
+        # winfo_fpixels('1i') gives physical pixels per inch.
+        # 72 pt/in is Tk's logical baseline; dividing gives the scale factor.
+        return max(1.0, widget.winfo_fpixels("1i") / 72.0)
+    except Exception:
+        return 1.0
+
+
+def fit_preview(image: Image.Image, widget=None) -> tuple:
+    """Return (photo, logical_w, logical_h) for a HiDPI-aware preview.
+
+    On Retina / HiDPI displays the PhotoImage is rendered at the physical
+    pixel count so it stays sharp, while the Label widget is sized to the
+    logical (point) dimensions so the layout doesn't change.
+    """
+    scale = _display_scale(widget) if widget is not None else 1.0
+    phys_max_w = int(PREVIEW_MAX_WIDTH * scale)
+    phys_max_h = int(PREVIEW_MAX_HEIGHT * scale)
+
     width, height = image.size
-    scale = min(PREVIEW_MAX_WIDTH / width, PREVIEW_MAX_HEIGHT / height, 1.0)
-    if scale >= 1.0:
-        return image
-    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
-    return image.resize(new_size, Image.Resampling.LANCZOS)
+    fit = min(phys_max_w / width, phys_max_h / height, 1.0)
+    phys_w = max(1, int(width * fit))
+    phys_h = max(1, int(height * fit))
+
+    resized = image.resize((phys_w, phys_h), Image.Resampling.LANCZOS)
+    photo = ImageTk.PhotoImage(resized)
+
+    # Logical size the Label should occupy (points, not physical pixels)
+    logical_w = max(1, int(phys_w / scale))
+    logical_h = max(1, int(phys_h / scale))
+    return photo, logical_w, logical_h
 
 
 class DataPolisherApp(tk.Tk):
@@ -243,10 +269,9 @@ class DataPolisherApp(tk.Tk):
         self.set_status(f"已保存：{path}")
 
     def _show_preview(self, label: tk.Label, image: Image.Image, attr: str) -> None:
-        preview = fit_preview(image)
-        photo = ImageTk.PhotoImage(preview)
+        photo, lw, lh = fit_preview(image, widget=label)
         setattr(self, attr, photo)
-        label.configure(image=photo, text="")
+        label.configure(image=photo, width=lw, height=lh, text="")
 
     def _set_canvas_blank(self, label: tk.Label, attr: str) -> None:
         setattr(self, attr, None)
