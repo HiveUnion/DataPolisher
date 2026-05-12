@@ -111,6 +111,7 @@ def main() -> int:
         "--clean",
         "--name=DataPolisher",
         "--hidden-import=PIL._tkinter_finder",
+        "--hidden-import=appdirs",
         "--collect-submodules=data_polisher",
     ]
 
@@ -149,7 +150,89 @@ def main() -> int:
     cmd.append(str(ROOT / "launcher.py"))
 
     print("Running:", " ".join(cmd))
-    return subprocess.call(cmd, cwd=ROOT)
+    rc = subprocess.call(cmd, cwd=ROOT)
+    if rc != 0:
+        return rc
+
+    if platform.system() == "Darwin":
+        _fix_macos_zlib_conflict(DIST / "DataPolisher.app")
+
+    return 0
+
+
+def _fix_macos_zlib_conflict(app_bundle: Path) -> None:
+    """Replace bundled zlib-ng with system zlib to avoid symbol conflicts.
+
+    Pillow wheels ship ``libz.1.3.1.zlib-ng.dylib`` (zlib-ng), while
+    Python's own ``zlib`` C extension links against ``/usr/lib/libz.1.dylib``
+    (standard zlib).  When both are loaded in the same process they export
+    identical C symbols (inflate, deflate, …) and can corrupt each other's
+    internal stream state, causing ``zlib.error: Error -3 … incorrect header
+    check`` at runtime.
+
+    Fix: rewrite every ``@rpath/libz.1.3.1.zlib-ng.dylib`` reference inside
+    the bundle to point at the always-available system library, then delete
+    the now-unused zlib-ng files.
+    """
+    import os
+
+    SYSTEM_LIBZ = "/usr/lib/libz.1.dylib"
+    ZLIB_NG_NAME = "libz.1.3.1.zlib-ng.dylib"
+
+    frameworks = app_bundle / "Contents" / "Frameworks"
+    if not frameworks.exists():
+        return
+
+    # Collect all Mach-O binaries (.so / .dylib) in the bundle.
+    binaries: list[Path] = []
+    for root, _dirs, files in os.walk(frameworks):
+        for fname in files:
+            fpath = Path(root) / fname
+            if fpath.suffix in (".so", ".dylib") and not fpath.is_symlink():
+                binaries.append(fpath)
+
+    # Patch each binary that references the bundled zlib-ng.
+    patched: list[Path] = []
+    for binary in binaries:
+        result = subprocess.run(
+            ["otool", "-L", str(binary)],
+            capture_output=True, text=True,
+        )
+        if ZLIB_NG_NAME not in result.stdout:
+            continue
+        # Find the exact install-name string used (may start with @rpath or
+        # an absolute path, depending on how PyInstaller laid things out).
+        old_name = None
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if ZLIB_NG_NAME in line:
+                old_name = line.split("(")[0].strip()
+                break
+        if not old_name:
+            continue
+        rc = subprocess.call([
+            "install_name_tool", "-change", old_name, SYSTEM_LIBZ, str(binary),
+        ])
+        if rc == 0:
+            subprocess.call(["codesign", "--sign", "-", "--force", str(binary)])
+            patched.append(binary)
+            print(f"  patched {binary.name}: {old_name} -> {SYSTEM_LIBZ}")
+
+    if patched:
+        # Remove all bundled zlib-ng copies (real files and symlinks, including
+        # dangling symlinks whose target was already deleted).
+        for search_root in (frameworks, app_bundle / "Contents" / "Resources"):
+            if not search_root.exists():
+                continue
+            for root, _dirs, files in os.walk(search_root):
+                for fname in files:
+                    if fname == ZLIB_NG_NAME:
+                        fpath = Path(root) / fname
+                        fpath.unlink(missing_ok=True)
+                        print(f"  removed {fpath.relative_to(app_bundle)}")
+        print(f"zlib-ng conflict fix: patched {len(patched)} binaries, using {SYSTEM_LIBZ}")
+    else:
+        print("zlib-ng conflict fix: nothing to patch")
 
 
 if __name__ == "__main__":
