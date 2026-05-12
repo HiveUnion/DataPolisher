@@ -41,7 +41,19 @@ jobs:
       - name: Build standalone bundle
         run: python build_app.py
 
-      - name: Upload artifact
+      - name: Package macOS app (preserve .app structure)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/DataPolisher.app dist/DataPolisher-macOS.zip
+
+      - name: Upload artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/DataPolisher-macOS.zip
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
