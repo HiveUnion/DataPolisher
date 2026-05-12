@@ -112,6 +112,7 @@ def main() -> int:
         "--clean",
         "--name=DataPolisher",
         "--hidden-import=PIL._tkinter_finder",
+        "--collect-submodules=data_polisher",
     ]
 
     if use_apple_vision:
@@ -145,7 +146,8 @@ def main() -> int:
     elif platform.system() == "Windows":
         cmd.append("--noconsole")
 
-    cmd.append(str(ROOT / "data_polisher" / "gui.py"))
+    # Use a top-level launcher so relative imports inside the package work.
+    cmd.append(str(ROOT / "launcher.py"))
 
     print("Running:", " ".join(cmd))
     return subprocess.call(cmd, cwd=ROOT)
