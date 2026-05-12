@@ -7,7 +7,10 @@ PixelGrid = Sequence[Sequence[Pixel]]
 
 
 def format_percent(value: float) -> str:
-    return f"{value * 100:.1f}%"
+    percent = round(value * 100, 1)
+    if percent == int(percent):
+        return f"{int(percent)}%"
+    return f"{percent:.1f}%"
 
 
 def calculate_metrics(

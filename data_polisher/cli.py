@@ -26,6 +26,20 @@ FONT_CANDIDATE_PATHS = [
     "/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf",
 ]
 
+BODY_NATIVE_FONT_PATH = "/System/Library/Fonts/SFNS.ttf"
+BODY_NATIVE_FONT_CANDIDATE_PATHS = [
+    "/System/Library/Fonts/SFNS.ttf",
+    "/System/Library/Fonts/SFNSRounded.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/ADTNumeric.ttc",
+    "/System/Library/Fonts/KohinoorGujarati.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf",
+]
+BODY_NATIVE_FONT_SIZE_ADJUST = -1
+BODY_NATIVE_FORCE_EDGE_VARIANT = "w2:quantized"
+BODY_NATIVE_FORCE_ALPHA_STRENGTH = 0.75
+
 
 def load_optional_cv2():
     try:
@@ -302,6 +316,127 @@ def fit_font_to_ink(text: str, target_rect: Dict[str, int], target_density: floa
         return font, rendered_ink_bbox(text, font)
 
     return best[1], best[2]
+
+
+def choose_font_size_for_rendered_height(font_path: str, texts, target_height: int) -> int:
+    """Choose a font size whose rendered ink height matches ``target_height``.
+
+    PIL font size is not the same as the visible glyph height.  A fixed
+    multiplier such as ``ink_height * 1.2`` can look right for one screenshot
+    but too small for another.  Measure the rendered bbox for the actual
+    replacement texts and pick the size whose median visible height best
+    matches the source row.
+    """
+    target_height = max(1, int(target_height))
+    best = None
+    for size in range(max(8, target_height), min(96, target_height * 2 + 24) + 1):
+        font = load_font_by_path(font_path, size)
+        if font is None:
+            font = load_font(size, "bold")
+        heights = []
+        for text in texts:
+            bbox = rendered_ink_bbox(str(text), font)
+            height = bbox[3] - bbox[1]
+            if height > 0:
+                heights.append(height)
+        if not heights:
+            continue
+        median_height = sorted(heights)[len(heights) // 2]
+        score = abs(median_height - target_height)
+        if best is None or score < best[0]:
+            best = (score, size)
+    return best[1] if best else target_height
+
+
+def _median(values) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return float(ordered[len(ordered) // 2])
+
+
+def choose_best_body_font(texts, source_stats: Dict[str, object]) -> Dict[str, object]:
+    """Pick the native font whose digit geometry best matches source samples."""
+    target_height = int(source_stats.get("target_height") or 1)
+    target_density = float(source_stats.get("target_density") or 0)
+    char_widths = source_stats.get("char_widths") or {}
+    best = None
+
+    for font_path in BODY_NATIVE_FONT_CANDIDATE_PATHS:
+        if not Path(font_path).exists():
+            continue
+        font_size = choose_font_size_for_rendered_height(font_path, texts, target_height)
+        font = load_font_by_path(font_path, font_size)
+        if font is None:
+            continue
+
+        heights = []
+        for text in texts:
+            bbox = rendered_ink_bbox(str(text), font)
+            heights.append(bbox[3] - bbox[1])
+        score = abs(_median(heights) - target_height) * 1.25
+
+        matched_chars = 0
+        for char, widths in char_widths.items():
+            if not widths:
+                continue
+            bbox = rendered_ink_bbox(str(char), font)
+            rendered_width = bbox[2] - bbox[0]
+            source_width = _median(widths)
+            score += abs(rendered_width - source_width) * 2.0
+            matched_chars += 1
+
+        if target_density > 0:
+            densities = []
+            for text in texts:
+                bbox = rendered_ink_bbox(str(text), font)
+                mask = text_mask_for_candidate(
+                    (420, 160),
+                    str(text),
+                    font,
+                    (40 - bbox[0], 40 - bbox[1]),
+                )
+                candidate = None
+                for variant_name, strength, candidate_mask in candidate_masks(
+                    mask,
+                    {
+                        "alpha_values": [255],
+                        "density": target_density,
+                        "edge_ratio": 0,
+                        "alpha_summary": {"p10": 255, "p50": 255, "p90": 255},
+                    },
+                ):
+                    if (
+                        variant_name == BODY_NATIVE_FORCE_EDGE_VARIANT
+                        and strength == BODY_NATIVE_FORCE_ALPHA_STRENGTH
+                    ):
+                        candidate = candidate_mask
+                        break
+                if candidate is not None:
+                    densities.append(mask_style(candidate)["density"])
+            if densities:
+                score += abs(_median(densities) - target_density) * 100.0
+
+        # Prefer fonts that can explain more sampled characters.
+        score -= matched_chars * 0.05
+        if best is None or score < best["score"]:
+            best = {
+                "font_path": font_path,
+                "font_size": font_size,
+                "score": score,
+                "matched_chars": matched_chars,
+                "target_height": target_height,
+            }
+
+    if best is not None:
+        return best
+    return {
+        "font_path": BODY_NATIVE_FONT_PATH,
+        "font_size": choose_font_size_for_rendered_height(BODY_NATIVE_FONT_PATH, texts, target_height),
+        "score": None,
+        "matched_chars": 0,
+        "target_height": target_height,
+    }
 
 
 def locate_text_rect(image, field_config: Dict[str, object], use_ocr: bool = False) -> Dict[str, int]:
@@ -631,11 +766,23 @@ def draw_text_with_calibration(image, ink_rect: Dict[str, int], text: str, style
         "alpha_summary": style["alpha_summary"],
     }
     best = None
+    forced_variant = calibration.get("force_edge_variant")
+    forced_strength = calibration.get("force_alpha_match_strength")
     for variant_name, strength, mask in candidate_masks(base_mask, style):
+        if forced_variant and variant_name != forced_variant:
+            continue
+        if forced_strength is not None and strength != forced_strength:
+            continue
         candidate_style = mask_style(mask)
         score = style_distance(target_style, candidate_style)
         if best is None or score < best[0]:
             best = (score, variant_name, strength, mask, candidate_style)
+    if best is None and forced_variant:
+        for variant_name, strength, mask in candidate_masks(base_mask, style):
+            candidate_style = mask_style(mask)
+            score = style_distance(target_style, candidate_style)
+            if best is None or score < best[0]:
+                best = (score, variant_name, strength, mask, candidate_style)
     chosen_mask = best[3] if best else base_mask
     if best:
         calibration["new_edge_variant"] = best[1]
@@ -774,7 +921,7 @@ def extract_metrics_from_items(items):
     return result
 
 
-def _trim_ink_rect_to_digits(pixels, bounds: Dict[str, int]) -> Dict[str, int]:
+def _trim_ink_rect_to_metric_suffix(pixels, bounds: Dict[str, int], raw_text: str) -> Dict[str, int]:
     """Trim a horizontal icon prefix (e.g. eye/play glyphs) off ``bounds``.
 
     OCR sometimes recognises a small icon as part of the number (e.g.
@@ -783,10 +930,15 @@ def _trim_ink_rect_to_digits(pixels, bounds: Dict[str, int]) -> Dict[str, int]:
     during inpaint.
 
     We split ``bounds`` into horizontal connected-column groups separated by
-    blank columns (no text-like pixels).  If multiple groups exist, we keep
-    only the rightmost group, which is where the number sits — typical
-    layouts place the icon on the left and the digit run on the right.
+    blank columns (no text-like pixels).  If OCR includes a non-metric prefix,
+    keep the right-side groups that correspond to the normalized metric text.
+    This preserves the leading icon while still keeping all digits, e.g.
+    ``"◎ 16"`` -> keep both ``1`` and ``6`` rather than only ``6``.
     """
+    metric_text = normalize_metric_text(raw_text)
+    if not metric_text or is_pure_metric_text(raw_text):
+        return bounds
+
     x0, y0 = bounds["x"], bounds["y"]
     x1 = x0 + bounds["width"]
     y1 = y0 + bounds["height"]
@@ -815,9 +967,14 @@ def _trim_ink_rect_to_digits(pixels, bounds: Dict[str, int]) -> Dict[str, int]:
     if len(groups) <= 1:
         return bounds
 
-    rightmost = groups[-1]
-    new_x = x0 + rightmost[0]
-    new_w = rightmost[1] - rightmost[0] + 1
+    # Keep the suffix group run that represents the normalized metric text.
+    # In OCR output such as "◎ 16", groups are [icon, 1, 6], so len("16")
+    # means "keep the last two groups". Clamp to keep at least one group and
+    # avoid dropping everything if OCR merged adjacent digits into one group.
+    keep_count = max(1, min(len(metric_text), len(groups)))
+    suffix_groups = groups[-keep_count:]
+    new_x = x0 + suffix_groups[0][0]
+    new_w = suffix_groups[-1][1] - suffix_groups[0][0] + 1
 
     sub_rows = [pixels[row][new_x:new_x + new_w] for row in range(y0, y1)]
     sub_bounds = detect_dark_text_bounds(sub_rows)
@@ -831,12 +988,13 @@ def _trim_ink_rect_to_digits(pixels, bounds: Dict[str, int]) -> Dict[str, int]:
     }
 
 
-def get_ink_rect(image, rect: Dict[str, int]) -> Dict[str, int]:
+def get_ink_rect(image, rect: Dict[str, int], raw_text: str = "") -> Dict[str, int]:
     pixels = crop_pixels(image, rect)
     bounds = detect_dark_text_bounds(pixels)
     if not bounds:
         return rect
-    bounds = _trim_ink_rect_to_digits(pixels, bounds)
+    if raw_text:
+        bounds = _trim_ink_rect_to_metric_suffix(pixels, bounds, raw_text)
     return translate_rect(bounds, rect)
 
 
@@ -944,6 +1102,31 @@ def segment_glyph_boxes(pixels, gap_threshold: int = 1):
             }
         )
     return boxes
+
+
+def collect_body_font_source_stats(image, body_targets) -> Dict[str, object]:
+    heights = []
+    densities = []
+    char_widths = {}
+    for _label, _replacement, item in body_targets:
+        text = normalize_metric_text(item["text"])
+        if not text:
+            continue
+        ink_rect = get_ink_rect(image, item["rect"], raw_text=item["text"])
+        heights.append(ink_rect["height"])
+        densities.append(extract_ink_style(image, ink_rect)["density"])
+        boxes = segment_glyph_boxes(crop_pixels(image, ink_rect))
+        if len(boxes) != len(text):
+            continue
+        for char, box in zip(text, boxes):
+            char_widths.setdefault(char, []).append(box["width"])
+
+    target_height = round(_median(heights)) if heights else 1
+    return {
+        "target_height": target_height,
+        "target_density": _median(densities),
+        "char_widths": char_widths,
+    }
 
 
 def proportional_char_boxes(rect: Dict[str, int], text: str):
@@ -1113,7 +1296,10 @@ def compose_text_from_row_atlas(image, atlas, ink_rect: Dict[str, int], text: st
     for char in text:
         glyph = atlas["glyphs"].get(char)
         if glyph is None:
-            return None
+            glyph = synthesize_metric_glyph_for_atlas(char, atlas)
+            if glyph is None:
+                return None
+            atlas["glyphs"][char] = glyph
         glyphs.append(glyph)
 
     from PIL import Image
@@ -1148,6 +1334,77 @@ def compose_text_from_row_atlas(image, atlas, ink_rect: Dict[str, int], text: st
         x += glyph_image.width + spacing
 
     return Image.alpha_composite(image.convert("RGBA"), layer).convert("RGB")
+
+
+def row_atlas_supports_texts(atlas, texts) -> bool:
+    if atlas is None:
+        return False
+    glyphs = atlas.get("glyphs", {})
+    return all(char in glyphs for text in texts for char in str(text))
+
+
+def should_use_body_row_atlas(atlas, replacement_texts) -> bool:
+    """Use source glyphs only when the row atlas fully covers replacements."""
+    return row_atlas_supports_texts(atlas, replacement_texts)
+
+
+def atlas_ink_color(atlas) -> tuple[int, int, int]:
+    import numpy as np
+
+    glyphs = atlas.get("glyphs", {}) if atlas else {}
+    samples = []
+    for glyph in glyphs.values():
+        image = glyph.get("image")
+        if image is None:
+            continue
+        arr = np.array(image.convert("RGBA"))
+        alpha = arr[:, :, 3] > 0
+        if alpha.any():
+            samples.append(arr[:, :, :3][alpha])
+    if not samples:
+        return (0, 0, 0)
+    pixels = np.concatenate(samples, axis=0)
+    mean = pixels.mean(axis=0)
+    return (round(float(mean[0])), round(float(mean[1])), round(float(mean[2])))
+
+
+def synthesize_metric_glyph_for_atlas(char: str, atlas):
+    from PIL import Image, ImageDraw
+
+    if not char:
+        return None
+    target_height = max(1, int(atlas.get("reference_height", 1)))
+    font_path = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+    # Pick size by a full-height digit, then render every missing char with
+    # that same size so "." and "%" keep natural proportions.
+    font_size = choose_font_size_for_rendered_height(font_path, ["0", "8"], target_height)
+    font = load_font_by_path(font_path, font_size)
+    if font is None:
+        font = load_font(font_size, "bold")
+
+    bbox = rendered_ink_bbox(char, font)
+    width = max(1, bbox[2] - bbox[0])
+    height = max(1, bbox[3] - bbox[1])
+    pad = max(2, round(target_height * 0.15))
+    mask = Image.new("L", (width + pad * 2, height + pad * 2), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.text((pad - bbox[0], pad - bbox[1]), char, font=font, fill=255)
+    tight = mask.getbbox()
+    if tight is None:
+        return None
+
+    mask = mask.crop(tight)
+    color = atlas_ink_color(atlas)
+    glyph = Image.new("RGBA", mask.size, (*color, 255))
+    glyph.putalpha(mask)
+    return {
+        "image": glyph,
+        "height": glyph.height,
+        "width": glyph.width,
+        "row_height": target_height,
+        "row_y_offset": max(0, target_height - glyph.height),
+        "synthetic": True,
+    }
 
 
 def render_text_from_glyphs(image, rect: Dict[str, int], text: str, atlas) -> bool:
@@ -1186,8 +1443,10 @@ def patch_ocr_rect_with_glyphs(
     atlas,
     original_text: str,
     row_atlas=None,
+    raw_text: str = "",
+    forced_font=None,
 ):
-    ink_rect = get_ink_rect(source_image, rect)
+    ink_rect = get_ink_rect(source_image, rect, raw_text=raw_text)
     image_size = {"width": image.width, "height": image.height}
 
     # Inpaint only the tight ink bounding box (actual text pixels) so that
@@ -1210,6 +1469,16 @@ def patch_ocr_rect_with_glyphs(
         return image, {"mode": "glyph"}
     style = extract_ink_style(source_image, ink_rect)
     calibration = calibrate_text_render(source_image, image, ink_rect, original_text, style)
+    if forced_font:
+        calibration["font_size"] = forced_font["font_size"]
+        calibration["font_path"] = forced_font["font_path"]
+        calibration["forced_font"] = True
+        if "force_edge_variant" in forced_font:
+            calibration["force_edge_variant"] = forced_font["force_edge_variant"]
+        if "force_alpha_match_strength" in forced_font:
+            calibration["force_alpha_match_strength"] = forced_font["force_alpha_match_strength"]
+        if "font_match" in forced_font:
+            calibration["font_match"] = forced_font["font_match"]
     image = draw_text_with_calibration(image, ink_rect, text, style, calibration)
     return image, {
         "mode": "font",
@@ -1321,28 +1590,54 @@ def beautify_normal_with_ocr(args, metrics, on_progress=None):
         else 0
     )
     body_atlas = build_row_atlas(source_image, items, body_y_anchor, y_tolerance=300)
+    if not should_use_body_row_atlas(body_atlas, [target[1] for target in body_targets]):
+        body_atlas = None
+    body_forced_font = None
+    if body_targets and body_atlas is None:
+        source_stats = collect_body_font_source_stats(source_image, body_targets)
+        body_font = choose_best_body_font([target[1] for target in body_targets], source_stats)
+        body_forced_font = {
+            "font_size": max(8, int(body_font["font_size"]) + BODY_NATIVE_FONT_SIZE_ADJUST),
+            "font_path": str(body_font["font_path"]),
+            "force_edge_variant": BODY_NATIVE_FORCE_EDGE_VARIANT,
+            "force_alpha_match_strength": BODY_NATIVE_FORCE_ALPHA_STRENGTH,
+            "font_match": body_font,
+        }
 
     try:
         header_item = find_header_view_value(items, image_size=image.size)
-        header_atlas = build_row_atlas(
-            source_image, items, header_item["rect"]["y"], y_tolerance=20
-        )
-        header_patches = [("header_views", metrics["views_text"], header_item, header_atlas)]
+        # The header row often contains icon-like OCR noise and sparse digits.
+        # Use calibrated font rendering there; row glyph synthesis is reserved
+        # for the body metric rows where nearby source glyphs are reliable.
+        header_patches = [("header_views", metrics["views_text"], header_item, None)]
     except RuntimeError:
         print("[warn] header view count not found, skipping header patch")
         header_patches = []
 
     patches = header_patches[:]
     for label_key, text, item in body_targets:
-        patches.append((label_key, text, item, body_atlas))
+        patches.append((label_key, text, item, body_atlas, body_forced_font))
 
     total = len(patches)
-    for i, (label, text, item, row_atlas) in enumerate(patches):
+    for i, patch in enumerate(patches):
+        if len(patch) == 4:
+            label, text, item, row_atlas = patch
+            forced_font = None
+        else:
+            label, text, item, row_atlas, forced_font = patch
         _prog(f"渲染数字 {i + 1}/{total}…")
         rect = item["rect"]
         original_text = normalize_metric_text(item["text"])
         image, report = patch_ocr_rect_with_glyphs(
-            image, source_image, rect, str(text), fallback_atlas, original_text, row_atlas
+            image,
+            source_image,
+            rect,
+            str(text),
+            fallback_atlas,
+            original_text,
+            row_atlas,
+            raw_text=item["text"],
+            forced_font=forced_font,
         )
         if args.style_report:
             print(json.dumps({str(label): report}, ensure_ascii=False))

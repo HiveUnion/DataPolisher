@@ -1,7 +1,34 @@
+# Python environments
 .venv/
+.venv-*/
+venv/
+env/
+
+# Python cache/test artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Packaging/build outputs
 build/
 dist/
 *.spec
+*.egg-info/
+
+# PyInstaller/runtime logs
+*.log
+
+# Local generated outputs
+*-polished.jpg
+*-polished.png
+diagnostic-*.jpg
+diagnostic-*.png
+
+# macOS/editor files
 .DS_Store
+.localized
