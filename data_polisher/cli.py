@@ -54,26 +54,18 @@ def translate_rect(rect: Dict[str, int], origin: Dict[str, int]) -> Dict[str, in
 
 
 def average_edge_color(image, rect: Dict[str, int]):
+    import numpy as np
+
     width, height = image.size
     padding = max(3, min(rect["width"], rect["height"]) // 5)
-    samples = []
     sample_rects = [
         {"x": rect["x"] - padding, "y": rect["y"], "width": padding, "height": rect["height"]},
-        {
-            "x": rect["x"] + rect["width"],
-            "y": rect["y"],
-            "width": padding,
-            "height": rect["height"],
-        },
+        {"x": rect["x"] + rect["width"], "y": rect["y"], "width": padding, "height": rect["height"]},
         {"x": rect["x"], "y": rect["y"] - padding, "width": rect["width"], "height": padding},
-        {
-            "x": rect["x"],
-            "y": rect["y"] + rect["height"],
-            "width": rect["width"],
-            "height": padding,
-        },
+        {"x": rect["x"], "y": rect["y"] + rect["height"], "width": rect["width"], "height": padding},
     ]
 
+    arrays = []
     for item in sample_rects:
         clipped = {
             "x": max(0, item["x"]),
@@ -81,27 +73,20 @@ def average_edge_color(image, rect: Dict[str, int]):
             "width": max(1, min(width - max(0, item["x"]), item["width"])),
             "height": max(1, min(height - max(0, item["y"]), item["height"])),
         }
-        samples.extend(image.crop(rect_to_box(clipped)).convert("RGB").getdata())
+        arr = np.array(image.crop(rect_to_box(clipped)).convert("RGB"), dtype=np.float32)
+        arrays.append(arr.reshape(-1, 3))
 
-    if not samples:
+    if not arrays:
         return (255, 255, 255)
 
-    bright_samples = []
-    for pixel in samples:
-        r, g, b = pixel
-        luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        if luminance > 218 and max(pixel) - min(pixel) < 28:
-            bright_samples.append(pixel)
-    if bright_samples:
-        samples = bright_samples
+    pixels = np.concatenate(arrays, axis=0)
+    luminance = 0.299 * pixels[:, 0] + 0.587 * pixels[:, 1] + 0.114 * pixels[:, 2]
+    is_bright = (luminance > 218) & ((pixels.max(axis=1) - pixels.min(axis=1)) < 28)
+    if is_bright.any():
+        pixels = pixels[is_bright]
 
-    total = [0, 0, 0]
-    for r, g, b in samples:
-        total[0] += r
-        total[1] += g
-        total[2] += b
-    count = len(samples)
-    return (round(total[0] / count), round(total[1] / count), round(total[2] / count))
+    mean = pixels.mean(axis=0)
+    return (round(float(mean[0])), round(float(mean[1])), round(float(mean[2])))
 
 
 def inpaint_or_fill(image, rect: Dict[str, int]):
@@ -222,21 +207,23 @@ def summarize_values(values):
 
 
 def mask_style(mask):
+    import numpy as np
+
     bbox = mask.getbbox()
     if bbox is None:
-        return {
-            "density": 0,
-            "edge_ratio": 0,
-            "alpha_summary": {"p10": 0, "p50": 0, "p90": 0},
-        }
+        return {"density": 0, "edge_ratio": 0, "alpha_summary": {"p10": 0, "p50": 0, "p90": 0}}
     crop = mask.crop(bbox)
-    values = [value for value in crop.getdata() if value > 0]
-    area = max(1, crop.width * crop.height)
-    core_count = sum(1 for value in values if value >= 220)
-    edge_count = sum(1 for value in values if 0 < value < 220)
+    arr = np.array(crop, dtype=np.uint8)
+    area = max(1, arr.size)
+    ink = arr[arr > 0]
+    if ink.size == 0:
+        return {"density": 0, "edge_ratio": 0, "alpha_summary": {"p10": 0, "p50": 0, "p90": 0}}
+    core_count = int((ink >= 220).sum())
+    edge_count = int(ink.size - core_count)
     total = max(1, core_count + edge_count)
+    values = ink.tolist()
     return {
-        "density": len(values) / area,
+        "density": ink.size / area,
         "edge_ratio": edge_count / total,
         "alpha_summary": summarize_values(values),
     }
@@ -367,89 +354,85 @@ def draw_text(image, rect: Dict[str, int], text: str, field_config: Dict[str, ob
 
 
 def extract_ink_color(image, rect: Dict[str, int]):
-    pixels = crop_pixels(image, rect)
-    samples = []
-    for row in pixels:
-        for pixel in row:
-            r, g, b = pixel
-            luminance = 0.299 * r + 0.587 * g + 0.114 * b
-            if luminance < 180 and max(pixel) - min(pixel) < 90:
-                samples.append(pixel)
+    import numpy as np
 
-    if not samples:
+    arr = np.array(image.crop(rect_to_box(rect)).convert("RGB"), dtype=np.float32)
+    if arr.size == 0:
         return (34, 34, 34)
-
-    samples.sort(key=lambda item: 0.299 * item[0] + 0.587 * item[1] + 0.114 * item[2])
-    core = samples[: max(1, int(len(samples) * 0.65))]
-    return tuple(round(sum(pixel[index] for pixel in core) / len(core)) for index in range(3))
+    pixels = arr.reshape(-1, 3)
+    luminance = 0.299 * pixels[:, 0] + 0.587 * pixels[:, 1] + 0.114 * pixels[:, 2]
+    is_ink = (luminance < 180) & ((pixels.max(axis=1) - pixels.min(axis=1)) < 90)
+    if not is_ink.any():
+        return (34, 34, 34)
+    ink = pixels[is_ink]
+    ink_lum = 0.299 * ink[:, 0] + 0.587 * ink[:, 1] + 0.114 * ink[:, 2]
+    order = np.argsort(ink_lum)
+    core = ink[order[: max(1, int(len(order) * 0.65))]]
+    mean = core.mean(axis=0)
+    return (round(float(mean[0])), round(float(mean[1])), round(float(mean[2])))
 
 
 def extract_ink_style(image, rect: Dict[str, int]):
-    pixels = crop_pixels(image, rect)
-    core_count = 0
-    edge_count = 0
-    ink_count = 0
+    import numpy as np
+
     background = average_edge_color(image, rect)
     ink_color = extract_ink_color(image, rect)
     bg_luminance = 0.299 * background[0] + 0.587 * background[1] + 0.114 * background[2]
     ink_luminance = 0.299 * ink_color[0] + 0.587 * ink_color[1] + 0.114 * ink_color[2]
     luminance_gap = max(1, bg_luminance - ink_luminance)
-    alpha_values = []
 
-    for row in pixels:
-        for pixel in row:
-            r, g, b = pixel
-            if max(pixel) - min(pixel) >= 90:
-                continue
-            luminance = 0.299 * r + 0.587 * g + 0.114 * b
-            alpha = max(0, min(255, round(((bg_luminance - luminance) / luminance_gap) * 255)))
-            if alpha > 0:
-                alpha_values.append(alpha)
-            if luminance < 92:
-                core_count += 1
-                ink_count += 1
-            elif luminance < 210:
-                edge_count += 1
-                ink_count += 1
+    arr = np.array(image.crop(rect_to_box(rect)).convert("RGB"), dtype=np.float32)
+    if arr.size == 0:
+        return {"color": ink_color, "background": background, "alpha_values": [255],
+                "alpha_summary": summarize_values([]), "edge_ratio": 0.0, "density": 0.0}
 
+    luminance = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    is_neutral = (arr.max(axis=2) - arr.min(axis=2)) < 90
+
+    alpha_raw = np.clip(((bg_luminance - luminance) / luminance_gap) * 255, 0, 255)
+    valid = is_neutral & (alpha_raw > 0)
+    alpha_values = alpha_raw[valid].astype(int).tolist()
+
+    core_count = int((is_neutral & (luminance < 92)).sum())
+    edge_count = int((is_neutral & (luminance >= 92) & (luminance < 210)).sum())
+    ink_count = core_count + edge_count
     total = max(1, core_count + edge_count)
     area = max(1, rect["width"] * rect["height"])
-    edge_ratio = edge_count / total
     return {
         "color": ink_color,
         "background": background,
         "alpha_values": sorted(alpha_values) or [255],
         "alpha_summary": summarize_values(alpha_values),
-        "edge_ratio": edge_ratio,
+        "edge_ratio": edge_count / total,
         "density": ink_count / area,
     }
 
 
 def match_alpha_distribution(mask, target_values):
-    source_values = sorted(value for value in mask.getdata() if value > 0)
-    if not source_values or not target_values:
+    import numpy as np
+    from PIL import Image
+
+    source_arr = np.array(mask, dtype=np.uint8)
+    nonzero = source_arr[source_arr > 0]
+    if nonzero.size == 0 or not target_values:
         return mask
 
-    source_len = len(source_values)
-    target_len = len(target_values)
+    source_sorted = np.sort(nonzero)
+    target_sorted = np.array(sorted(target_values), dtype=np.float32)
+    source_len = len(source_sorted)
+    target_len = len(target_sorted)
 
-    def map_value(value):
-        if value <= 0:
-            return 0
-        lo = 0
-        hi = source_len
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if source_values[mid] <= value:
-                lo = mid + 1
-            else:
-                hi = mid
-        rank = max(0, lo - 1)
-        percentile = rank / max(1, source_len - 1)
-        target_index = min(target_len - 1, round(percentile * (target_len - 1)))
-        return target_values[target_index]
-
-    return mask.point(map_value)
+    # Build a 256-entry LUT so we never call Python per pixel.
+    v = np.arange(1, 256, dtype=np.float32)
+    idx = np.searchsorted(source_sorted, v, side="right") - 1
+    rank = np.clip(idx, 0, source_len - 1).astype(np.float32)
+    percentile = rank / max(1, source_len - 1)
+    target_index = np.clip(
+        np.round(percentile * (target_len - 1)).astype(int), 0, target_len - 1
+    )
+    lut = np.zeros(256, dtype=np.uint8)
+    lut[1:] = target_sorted[target_index].astype(np.uint8)
+    return Image.fromarray(lut[source_arr], mode="L")
 
 
 def blend_masks(base_mask, matched_mask, strength: float):
@@ -457,16 +440,13 @@ def blend_masks(base_mask, matched_mask, strength: float):
         return base_mask
     if strength >= 1:
         return matched_mask
+    import numpy as np
+    from PIL import Image
 
-    base_data = list(base_mask.getdata())
-    matched_data = list(matched_mask.getdata())
-    blended = [
-        round(base_value * (1 - strength) + matched_value * strength)
-        for base_value, matched_value in zip(base_data, matched_data)
-    ]
-    result = base_mask.copy()
-    result.putdata(blended)
-    return result
+    base_arr = np.array(base_mask, dtype=np.float32)
+    matched_arr = np.array(matched_mask, dtype=np.float32)
+    blended = np.round(base_arr * (1 - strength) + matched_arr * strength).astype(np.uint8)
+    return Image.fromarray(blended, mode="L")
 
 
 def edge_mask_variants(mask):
@@ -946,6 +926,7 @@ def segment_char_boxes(image, rect: Dict[str, int], text: str):
 
 def glyph_from_rect(image, rect: Dict[str, int]):
     from PIL import Image
+    import numpy as np
 
     crop = image.crop(rect_to_box(rect)).convert("RGB")
     background = average_edge_color(image, rect)
@@ -953,19 +934,15 @@ def glyph_from_rect(image, rect: Dict[str, int]):
     bg_luminance = 0.299 * background[0] + 0.587 * background[1] + 0.114 * background[2]
     ink_luminance = 0.299 * ink_color[0] + 0.587 * ink_color[1] + 0.114 * ink_color[2]
     luminance_gap = max(1, bg_luminance - ink_luminance)
-    alpha = Image.new("L", crop.size, 0)
-    alpha_values = []
 
-    for y in range(crop.height):
-        for x in range(crop.width):
-            r, g, b = crop.getpixel((x, y))
-            if max(r, g, b) - min(r, g, b) >= 100:
-                continue
-            luminance = 0.299 * r + 0.587 * g + 0.114 * b
-            value = max(0, min(255, round(((bg_luminance - luminance) / luminance_gap) * 255)))
-            if value > 0:
-                alpha.putpixel((x, y), value)
-                alpha_values.append(value)
+    arr = np.array(crop, dtype=np.float32)  # (H, W, 3)
+    is_neutral = (arr.max(axis=2) - arr.min(axis=2)) < 100
+    luminance = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    alpha_raw = np.clip(((bg_luminance - luminance) / luminance_gap) * 255, 0, 255)
+    alpha_arr = np.where(is_neutral & (alpha_raw > 0), alpha_raw, 0).astype(np.uint8)
+
+    alpha = Image.fromarray(alpha_arr, mode="L")
+    alpha_values = alpha_arr[alpha_arr > 0].tolist()
 
     bbox = alpha.getbbox()
     if bbox is None:
