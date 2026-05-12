@@ -774,10 +774,69 @@ def extract_metrics_from_items(items):
     return result
 
 
+def _trim_ink_rect_to_digits(pixels, bounds: Dict[str, int]) -> Dict[str, int]:
+    """Trim a horizontal icon prefix (e.g. eye/play glyphs) off ``bounds``.
+
+    OCR sometimes recognises a small icon as part of the number (e.g.
+    ``"◎ 36"``).  ``detect_dark_text_bounds`` then returns a rect covering
+    *both* the icon and the digits, which would cause the icon to be erased
+    during inpaint.
+
+    We split ``bounds`` into horizontal connected-column groups separated by
+    blank columns (no text-like pixels).  If multiple groups exist, we keep
+    only the rightmost group, which is where the number sits — typical
+    layouts place the icon on the left and the digit run on the right.
+    """
+    x0, y0 = bounds["x"], bounds["y"]
+    x1 = x0 + bounds["width"]
+    y1 = y0 + bounds["height"]
+
+    has_text = []
+    for col in range(x0, x1):
+        found = False
+        for row in range(y0, y1):
+            pixel = pixels[row][col]
+            if pixel_looks_like_text(pixel):
+                found = True
+                break
+        has_text.append(found)
+
+    groups: list[tuple[int, int]] = []
+    start = None
+    for idx, flag in enumerate(has_text):
+        if flag and start is None:
+            start = idx
+        elif not flag and start is not None:
+            groups.append((start, idx - 1))
+            start = None
+    if start is not None:
+        groups.append((start, len(has_text) - 1))
+
+    if len(groups) <= 1:
+        return bounds
+
+    rightmost = groups[-1]
+    new_x = x0 + rightmost[0]
+    new_w = rightmost[1] - rightmost[0] + 1
+
+    sub_rows = [pixels[row][new_x:new_x + new_w] for row in range(y0, y1)]
+    sub_bounds = detect_dark_text_bounds(sub_rows)
+    if not sub_bounds:
+        return {"x": new_x, "y": y0, "width": new_w, "height": bounds["height"]}
+    return {
+        "x": new_x + sub_bounds["x"],
+        "y": y0 + sub_bounds["y"],
+        "width": sub_bounds["width"],
+        "height": sub_bounds["height"],
+    }
+
+
 def get_ink_rect(image, rect: Dict[str, int]) -> Dict[str, int]:
-    bounds = detect_dark_text_bounds(crop_pixels(image, rect))
+    pixels = crop_pixels(image, rect)
+    bounds = detect_dark_text_bounds(pixels)
     if not bounds:
         return rect
+    bounds = _trim_ink_rect_to_digits(pixels, bounds)
     return translate_rect(bounds, rect)
 
 
