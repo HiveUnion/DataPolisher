@@ -16,7 +16,6 @@ jobs:
         include:
           - os: macos-latest
             artifact_name: DataPolisher-macOS
-            artifact_path: dist/DataPolisher.app
           - os: windows-latest
             artifact_name: DataPolisher-Windows
             artifact_path: dist/DataPolisher
@@ -41,16 +40,14 @@ jobs:
       - name: Build standalone bundle
         run: python build_app.py
 
-      - name: Package macOS app (preserve .app structure)
-        if: runner.os == 'macOS'
-        run: ditto -c -k --keepParent dist/DataPolisher.app dist/DataPolisher-macOS.zip
-
+      # Upload dist/ directly so the artifact zip contains DataPolisher.app/
+      # at its root — users unzip once and get a ready-to-run .app bundle.
       - name: Upload artifact (macOS)
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/DataPolisher-macOS.zip
+          path: dist
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
