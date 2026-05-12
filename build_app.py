@@ -67,10 +67,7 @@ _EXCLUDE_MODULES = [
     "docutils",
     "sphinx",
     "pytest",
-    "setuptools",
-    "distutils",
     "pkg_resources._vendor",
-    "xml.etree.ElementTree",  # kept in stdlib but the heavy lxml is not needed
     "lxml",
     "sqlalchemy",
     "aiohttp",
@@ -93,7 +90,9 @@ def _apple_vision_available() -> bool:
 
 
 def main() -> int:
-    if shutil.which("pyinstaller") is None:
+    try:
+        import PyInstaller  # noqa: F401
+    except ImportError:
         print("PyInstaller not installed. Run: pip install -r requirements-dev.txt", file=sys.stderr)
         return 1
 
@@ -107,7 +106,7 @@ def main() -> int:
     use_apple_vision = _apple_vision_available()
 
     cmd = [
-        "pyinstaller",
+        sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--clean",
         "--name=DataPolisher",
