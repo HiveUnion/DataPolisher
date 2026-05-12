@@ -5,6 +5,7 @@ numpy>=1.26
 paddlepaddle>=3.0
 paddleocr>=3.0
 
-# macOS only — install to use the OS-native Vision.framework OCR backend.
-# When present, PaddlePaddle/PaddleOCR are NOT bundled, saving 300-600 MB.
-#   pip install pyobjc-framework-Vision pyobjc-framework-Quartz
+# macOS only: OS-native Vision.framework OCR backend.
+# When present, build_app.py skips bundling PaddlePaddle/PaddleOCR (saves 300-600 MB).
+pyobjc-framework-Vision>=9.0; sys_platform == "darwin"
+pyobjc-framework-Quartz>=9.0; sys_platform == "darwin"
