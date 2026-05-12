@@ -1,7 +1,20 @@
 from __future__ import annotations
 
+import sys
 from functools import lru_cache
 from typing import Any, Dict, Iterable, Optional
+
+
+def _apple_vision_available() -> bool:
+    """Return True when the Apple Vision OCR backend can be used."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        from . import ocr_apple  # noqa: F401
+
+        return ocr_apple.is_available()
+    except Exception:
+        return False
 
 
 def _flatten_ocr_items(result: Any) -> Iterable[Any]:
@@ -145,12 +158,20 @@ def get_ocr_engine():
 
 
 def detect_bounds_with_paddle(image) -> Optional[Dict[str, int]]:
+    if _apple_vision_available():
+        from . import ocr_apple
+
+        return ocr_apple.detect_bounds(image)
     engine = get_ocr_engine()
     result = engine.predict(image)
     return extract_ocr_text_bounds(result)
 
 
 def detect_items_with_paddle(image):
+    if _apple_vision_available():
+        from . import ocr_apple
+
+        return ocr_apple.detect_items(image)
     engine = get_ocr_engine()
     result = engine.predict(image)
     return extract_ocr_items(result)

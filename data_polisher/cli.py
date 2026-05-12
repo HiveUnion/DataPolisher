@@ -719,16 +719,34 @@ def find_value_below_label(items, label: str):
     return candidates[0][1]
 
 
-def find_header_view_value(items):
+def find_header_view_value(items, image_size=None):
+    # Base search window designed for BASE_SIZE (460x997).
+    # Scale proportionally when a different resolution image is used.
+    base_w = BASE_SIZE["width"]
+    base_h = BASE_SIZE["height"]
+    if image_size is not None:
+        sx = image_size[0] / base_w
+        sy = image_size[1] / base_h
+    else:
+        sx = sy = 1.0
+
+    y_min = int(210 * sy)
+    y_max = int(270 * sy)
+    x_min = int(100 * sx)
+    x_max = int(210 * sx)
+    # Allow a 30% slack on each side to absorb minor layout differences.
+    y_slack = int((y_max - y_min) * 0.3)
+    x_slack = int((x_max - x_min) * 0.3)
+
     candidates = []
     for item in items:
         text = normalize_metric_text(item["text"])
         rect = item["rect"]
         if not text or "%" in text:
             continue
-        if rect["y"] < 210 or rect["y"] > 270:
+        if rect["y"] < y_min - y_slack or rect["y"] > y_max + y_slack:
             continue
-        if rect["x"] < 100 or rect["x"] > 210:
+        if rect["x"] < x_min - x_slack or rect["x"] > x_max + x_slack:
             continue
         candidates.append((rect["x"], item))
 
@@ -1253,20 +1271,22 @@ def beautify_normal_with_ocr(args, metrics):
     )
     body_atlas = build_row_atlas(source_image, items, body_y_anchor, y_tolerance=300)
 
-    header_item = find_header_view_value(items)
-    header_atlas = build_row_atlas(
-        source_image, items, header_item["rect"]["y"], y_tolerance=20
-    )
+    try:
+        header_item = find_header_view_value(items, image_size=image.size)
+        header_atlas = build_row_atlas(
+            source_image, items, header_item["rect"]["y"], y_tolerance=20
+        )
+        header_patches = [("header_views", metrics["views_text"], header_item, header_atlas)]
+    except RuntimeError:
+        print("[warn] header view count not found, skipping header patch")
+        header_patches = []
 
-    patches = [("header_views", metrics["views_text"], header_item, header_atlas)]
+    patches = header_patches[:]
     for label_key, text, item in body_targets:
         patches.append((label_key, text, item, body_atlas))
 
     for label, text, item, row_atlas in patches:
-        if label == "header_views":
-            rect = refine_header_number_rect(source_image, item["rect"])
-        else:
-            rect = item["rect"]
+        rect = item["rect"]
         original_text = normalize_metric_text(item["text"])
         image, report = patch_ocr_rect_with_glyphs(
             image, source_image, rect, str(text), fallback_atlas, original_text, row_atlas

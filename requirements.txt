@@ -1,5 +1,10 @@
 pillow>=10.0
-opencv-python>=4.7
+# Use the headless variant — removes Qt GUI backends (~100-150 MB in the bundle).
+opencv-python-headless>=4.7
 numpy>=1.26
 paddlepaddle>=3.0
 paddleocr>=3.0
+
+# macOS only — install to use the OS-native Vision.framework OCR backend.
+# When present, PaddlePaddle/PaddleOCR are NOT bundled, saving 300-600 MB.
+#   pip install pyobjc-framework-Vision pyobjc-framework-Quartz
