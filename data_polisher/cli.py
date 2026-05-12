@@ -1247,12 +1247,19 @@ def refine_header_number_rect(image, rect: Dict[str, int]) -> Dict[str, int]:
     }
 
 
-def beautify_normal_with_ocr(args, metrics):
+def beautify_normal_with_ocr(args, metrics, on_progress=None):
     from PIL import Image
     import numpy as np
 
+    def _prog(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
+    _prog("加载图片…")
     image = Image.open(args.normal).convert("RGB")
     source_image = image.copy()
+
+    _prog("OCR 识别文字…")
     items = detect_items_with_paddle(np.array(image))
     fallback_atlas = build_glyph_atlas(source_image, items) if args.glyph_atlas else {}
 
@@ -1287,7 +1294,9 @@ def beautify_normal_with_ocr(args, metrics):
     for label_key, text, item in body_targets:
         patches.append((label_key, text, item, body_atlas))
 
-    for label, text, item, row_atlas in patches:
+    total = len(patches)
+    for i, (label, text, item, row_atlas) in enumerate(patches):
+        _prog(f"渲染数字 {i + 1}/{total}…")
         rect = item["rect"]
         original_text = normalize_metric_text(item["text"])
         image, report = patch_ocr_rect_with_glyphs(
@@ -1296,6 +1305,7 @@ def beautify_normal_with_ocr(args, metrics):
         if args.style_report:
             print(json.dumps({str(label): report}, ensure_ascii=False))
 
+    _prog("完成")
     return image
 
 
