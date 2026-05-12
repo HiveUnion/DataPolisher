@@ -784,16 +784,9 @@ def get_ink_rect(image, rect: Dict[str, int]) -> Dict[str, int]:
 def patch_ocr_rect(image, source_image, rect: Dict[str, int], text: str):
     ink_rect = get_ink_rect(source_image, rect)
     image_size = {"width": image.width, "height": image.height}
-    union_x = min(rect["x"], ink_rect["x"])
-    union_y = min(rect["y"], ink_rect["y"])
-    union_x2 = max(rect["x"] + rect["width"], ink_rect["x"] + ink_rect["width"])
-    union_y2 = max(rect["y"] + rect["height"], ink_rect["y"] + ink_rect["height"])
-    union_rect = {
-        "x": union_x, "y": union_y,
-        "width": max(1, union_x2 - union_x),
-        "height": max(1, union_y2 - union_y),
-    }
-    padded = expand_rect(union_rect, max(2, ink_rect["height"] // 5), image_size)
+    # Inpaint only the actual ink pixels so decorative icons (e.g. eye/play)
+    # that share the OCR bounding box are preserved.
+    padded = expand_rect(ink_rect, max(2, ink_rect["height"] // 5), image_size)
     style = extract_ink_style(source_image, ink_rect)
     image = inpaint_or_fill(image, padded)
     image = draw_text_in_ocr_rect(image, ink_rect, text, style)
@@ -1138,20 +1131,10 @@ def patch_ocr_rect_with_glyphs(
     ink_rect = get_ink_rect(source_image, rect)
     image_size = {"width": image.width, "height": image.height}
 
-    # Use the union of the OCR bounding box and the ink rect so that coloured
-    # icons (e.g. the eye / play icon next to a number) are also inpainted even
-    # though they don't pass the dark-pixel "text" test.
-    union_x = min(rect["x"], ink_rect["x"])
-    union_y = min(rect["y"], ink_rect["y"])
-    union_x2 = max(rect["x"] + rect["width"], ink_rect["x"] + ink_rect["width"])
-    union_y2 = max(rect["y"] + rect["height"], ink_rect["y"] + ink_rect["height"])
-    union_rect = {
-        "x": union_x,
-        "y": union_y,
-        "width": max(1, union_x2 - union_x),
-        "height": max(1, union_y2 - union_y),
-    }
-    padded = expand_rect(union_rect, max(2, ink_rect["height"] // 5), image_size)
+    # Inpaint only the tight ink bounding box (actual text pixels) so that
+    # decorative icons that share the OCR bounding box (e.g. the eye / play
+    # icon next to a view count) are left untouched.
+    padded = expand_rect(ink_rect, max(2, ink_rect["height"] // 5), image_size)
     image = inpaint_or_fill(image, padded)
 
     if row_atlas is not None:
