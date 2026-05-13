@@ -1,6 +1,7 @@
 import unittest
 
 from data_polisher.core import calculate_metrics, format_percent
+from data_polisher.cli import metric_text_changed
 
 
 class MetricsFormatTests(unittest.TestCase):
@@ -24,6 +25,12 @@ class MetricsFormatTests(unittest.TestCase):
 
         self.assertEqual(metrics["click_rate_text"], "30%")
         self.assertEqual(metrics["interaction_rate_text"], "0%")
+
+    def test_metric_text_changed_skips_identical_values(self):
+        self.assertFalse(metric_text_changed("122", "122"))
+        self.assertFalse(metric_text_changed("36", "36"))
+        self.assertFalse(metric_text_changed("0%", "0%"))
+        self.assertTrue(metric_text_changed("18.2%", "29.5%"))
 
 
 if __name__ == "__main__":

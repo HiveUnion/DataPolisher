@@ -26,19 +26,20 @@ FONT_CANDIDATE_PATHS = [
     "/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf",
 ]
 
-BODY_NATIVE_FONT_PATH = "/System/Library/Fonts/SFNS.ttf"
+BODY_NATIVE_FONT_PATH = "/System/Library/Fonts/KohinoorGujarati.ttc"
 BODY_NATIVE_FONT_CANDIDATE_PATHS = [
+    "/System/Library/Fonts/KohinoorGujarati.ttc",
+    "/System/Library/Fonts/Avenir Next.ttc",
     "/System/Library/Fonts/SFNS.ttf",
     "/System/Library/Fonts/SFNSRounded.ttf",
     "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/ADTNumeric.ttc",
-    "/System/Library/Fonts/KohinoorGujarati.ttc",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf",
 ]
-BODY_NATIVE_FONT_SIZE_ADJUST = -1
-BODY_NATIVE_FORCE_EDGE_VARIANT = "w2:quantized"
-BODY_NATIVE_FORCE_ALPHA_STRENGTH = 0.75
+BODY_NATIVE_FONT_SIZE_ADJUST = 2
+BODY_NATIVE_FORCE_EDGE_VARIANT = "w1x:quantized"
+BODY_NATIVE_FORCE_ALPHA_STRENGTH = 0.25
 
 
 def load_optional_cv2():
@@ -251,8 +252,8 @@ def style_distance(target, candidate):
         + abs(target_alpha["p50"] - candidate_alpha["p50"])
         + abs(target_alpha["p90"] - candidate_alpha["p90"])
     ) / 255
-    density_score = abs(target["density"] - candidate["density"]) * 8
-    edge_score = abs(target["edge_ratio"] - candidate["edge_ratio"]) * 8
+    density_score = abs(target["density"] - candidate["density"]) * 12
+    edge_score = abs(target["edge_ratio"] - candidate["edge_ratio"]) * 6
     return round(alpha_score + density_score + edge_score, 6)
 
 
@@ -359,6 +360,7 @@ def choose_best_body_font(texts, source_stats: Dict[str, object]) -> Dict[str, o
     """Pick the native font whose digit geometry best matches source samples."""
     target_height = int(source_stats.get("target_height") or 1)
     target_density = float(source_stats.get("target_density") or 0)
+    target_edge_ratio = float(source_stats.get("target_edge_ratio") or 0)
     char_widths = source_stats.get("char_widths") or {}
     best = None
 
@@ -387,7 +389,7 @@ def choose_best_body_font(texts, source_stats: Dict[str, object]) -> Dict[str, o
             matched_chars += 1
 
         if target_density > 0:
-            densities = []
+            styles = []
             for text in texts:
                 bbox = rendered_ink_bbox(str(text), font)
                 mask = text_mask_for_candidate(
@@ -396,7 +398,12 @@ def choose_best_body_font(texts, source_stats: Dict[str, object]) -> Dict[str, o
                     font,
                     (40 - bbox[0], 40 - bbox[1]),
                 )
-                candidate = None
+                target_style = {
+                    "density": target_density,
+                    "edge_ratio": target_edge_ratio,
+                    "alpha_summary": {"p10": 255, "p50": 255, "p90": 255},
+                }
+                best_style = None
                 for variant_name, strength, candidate_mask in candidate_masks(
                     mask,
                     {
@@ -407,15 +414,24 @@ def choose_best_body_font(texts, source_stats: Dict[str, object]) -> Dict[str, o
                     },
                 ):
                     if (
-                        variant_name == BODY_NATIVE_FORCE_EDGE_VARIANT
-                        and strength == BODY_NATIVE_FORCE_ALPHA_STRENGTH
+                        BODY_NATIVE_FORCE_EDGE_VARIANT is not None
+                        and variant_name != BODY_NATIVE_FORCE_EDGE_VARIANT
                     ):
-                        candidate = candidate_mask
-                        break
-                if candidate is not None:
-                    densities.append(mask_style(candidate)["density"])
-            if densities:
-                score += abs(_median(densities) - target_density) * 100.0
+                        continue
+                    if (
+                        BODY_NATIVE_FORCE_ALPHA_STRENGTH is not None
+                        and strength != BODY_NATIVE_FORCE_ALPHA_STRENGTH
+                    ):
+                        continue
+                    candidate_style = mask_style(candidate_mask)
+                    candidate_score = style_distance(target_style, candidate_style)
+                    if best_style is None or candidate_score < best_style[0]:
+                        best_style = (candidate_score, candidate_style)
+                if best_style is not None:
+                    styles.append(best_style[1])
+            if styles:
+                score += abs(_median([style["density"] for style in styles]) - target_density) * 100.0
+                score += abs(_median([style["edge_ratio"] for style in styles]) - target_edge_ratio) * 25.0
 
         # Prefer fonts that can explain more sampled characters.
         score -= matched_chars * 0.05
@@ -813,6 +829,10 @@ def normalize_metric_text(text: str) -> str:
     return "".join(ch for ch in str(text) if ch.isdigit() or ch == "." or ch == "%")
 
 
+def metric_text_changed(original_text: str, new_text: str) -> bool:
+    return normalize_metric_text(original_text) != normalize_metric_text(new_text)
+
+
 def is_pure_metric_text(text: str) -> bool:
     stripped = str(text).strip()
     return bool(stripped) and stripped == normalize_metric_text(stripped)
@@ -1107,6 +1127,7 @@ def segment_glyph_boxes(pixels, gap_threshold: int = 1):
 def collect_body_font_source_stats(image, body_targets) -> Dict[str, object]:
     heights = []
     densities = []
+    edge_ratios = []
     char_widths = {}
     for _label, _replacement, item in body_targets:
         text = normalize_metric_text(item["text"])
@@ -1114,7 +1135,9 @@ def collect_body_font_source_stats(image, body_targets) -> Dict[str, object]:
             continue
         ink_rect = get_ink_rect(image, item["rect"], raw_text=item["text"])
         heights.append(ink_rect["height"])
-        densities.append(extract_ink_style(image, ink_rect)["density"])
+        style = extract_ink_style(image, ink_rect)
+        densities.append(style["density"])
+        edge_ratios.append(style["edge_ratio"])
         boxes = segment_glyph_boxes(crop_pixels(image, ink_rect))
         if len(boxes) != len(text):
             continue
@@ -1125,6 +1148,7 @@ def collect_body_font_source_stats(image, body_targets) -> Dict[str, object]:
     return {
         "target_height": target_height,
         "target_density": _median(densities),
+        "target_edge_ratio": _median(edge_ratios),
         "char_widths": char_widths,
     }
 
@@ -1595,14 +1619,26 @@ def beautify_normal_with_ocr(args, metrics, on_progress=None):
     body_forced_font = None
     if body_targets and body_atlas is None:
         source_stats = collect_body_font_source_stats(source_image, body_targets)
-        body_font = choose_best_body_font([target[1] for target in body_targets], source_stats)
+        body_font = {
+            "font_path": BODY_NATIVE_FONT_PATH,
+            "font_size": choose_font_size_for_rendered_height(
+                BODY_NATIVE_FONT_PATH,
+                [target[1] for target in body_targets],
+                int(source_stats["target_height"]),
+            ),
+            "score": None,
+            "matched_chars": len(source_stats.get("char_widths", {})),
+            "target_height": source_stats["target_height"],
+        }
         body_forced_font = {
             "font_size": max(8, int(body_font["font_size"]) + BODY_NATIVE_FONT_SIZE_ADJUST),
             "font_path": str(body_font["font_path"]),
-            "force_edge_variant": BODY_NATIVE_FORCE_EDGE_VARIANT,
-            "force_alpha_match_strength": BODY_NATIVE_FORCE_ALPHA_STRENGTH,
             "font_match": body_font,
         }
+        if BODY_NATIVE_FORCE_EDGE_VARIANT is not None:
+            body_forced_font["force_edge_variant"] = BODY_NATIVE_FORCE_EDGE_VARIANT
+        if BODY_NATIVE_FORCE_ALPHA_STRENGTH is not None:
+            body_forced_font["force_alpha_match_strength"] = BODY_NATIVE_FORCE_ALPHA_STRENGTH
 
     try:
         header_item = find_header_view_value(items, image_size=image.size)
@@ -1628,6 +1664,10 @@ def beautify_normal_with_ocr(args, metrics, on_progress=None):
         _prog(f"渲染数字 {i + 1}/{total}…")
         rect = item["rect"]
         original_text = normalize_metric_text(item["text"])
+        if not metric_text_changed(original_text, str(text)):
+            if args.style_report:
+                print(json.dumps({str(label): {"mode": "unchanged", "text": original_text}}, ensure_ascii=False))
+            continue
         image, report = patch_ocr_rect_with_glyphs(
             image,
             source_image,
