@@ -31,6 +31,13 @@ from .red_number_fonts import (
 _PKG_STATIC_FONTS = Path(__file__).resolve().parent / "static" / "fonts"
 # DIN ``%`` from 小红书 APK — geometric sans, closer to analytics cards than 苹方.
 BUNDLED_DIN_PERCENT = _PKG_STATIC_FONTS / "DIN-OT-Medium.ttf"
+# 信息流封面左下角小眼睛浏览数：样本比对中 jlm_cmss10 的窄身轻字重更贴近原图。
+BUNDLED_FEED_OVERLAY_VIEWS_FONT = _PKG_STATIC_FONTS / "jlm_cmss10.ttf"
+FEED_OVERLAY_VIEWS_FONT_SIZE = 17
+FEED_OVERLAY_VIEWS_DX = -1
+FEED_OVERLAY_VIEWS_DY = 1
+FEED_OVERLAY_VIEWS_ALPHA_GAIN = 1.0
+FEED_OVERLAY_VIEWS_ALPHA_GAMMA = 0.76
 
 _FONT_EXTRA = bundled_font_paths_in_order()
 
@@ -761,10 +768,16 @@ def choose_font_size_for_rendered_height(font_path: str, texts, target_height: i
 def choose_feed_overlay_font_size(font_path: str, texts, ink_rect: Dict[str, int]) -> int:
     """Fit tiny feed overlay digits by visual height and available slot width."""
 
+    if Path(font_path) == BUNDLED_FEED_OVERLAY_VIEWS_FONT:
+        return FEED_OVERLAY_VIEWS_FONT_SIZE
+
     ink_h = max(1, int(ink_rect["height"]))
     if ink_h <= 14:
-        target_height = ink_h + 3
-        target_width = max(6.0, float(ink_rect["width"]) * 1.65)
+        # OCR/localized overlay slots include a little antialias halo and nearby
+        # cover texture. Matching the raw slot made the tiny feed digits too big;
+        # the eye0.png gold sample is an 18x12 slot but a ~15x11 visible "40".
+        target_height = max(8, ink_h - 1)
+        target_width = max(6.0, float(ink_rect["width"]) * 0.9)
     else:
         target_height = max(8, int(round(ink_h * 0.94)))
         target_width = max(6.0, float(ink_rect["width"]) * 1.0)
@@ -821,7 +834,13 @@ def red_number_forced_font_for_standalone_patch(
         return None
 
     if overlay_views_ink:
-        candidates = (BUNDLED_DIN_PERCENT, RED_NUMBER_REGULAR, RED_NUMBER_MEDIUM, RED_NUMBER_BOLD)
+        candidates = (
+            BUNDLED_FEED_OVERLAY_VIEWS_FONT,
+            BUNDLED_DIN_PERCENT,
+            RED_NUMBER_REGULAR,
+            RED_NUMBER_MEDIUM,
+            RED_NUMBER_BOLD,
+        )
         fp = next((str(path) for path in candidates if path.is_file()), "")
     else:
         fp = str(BODY_NATIVE_FONT_PATH)
@@ -831,7 +850,10 @@ def red_number_forced_font_for_standalone_patch(
     target_h = max(8, int(ink_rect["height"]))
     texts_for_size = list(dict.fromkeys([ot, nt]))
     if overlay_views_ink:
-        font_size = choose_feed_overlay_font_size(fp, texts_for_size, ink_rect)
+        if Path(fp) == BUNDLED_FEED_OVERLAY_VIEWS_FONT:
+            font_size = FEED_OVERLAY_VIEWS_FONT_SIZE
+        else:
+            font_size = choose_feed_overlay_font_size(fp, texts_for_size, ink_rect)
     else:
         font_size = max(
             8,
@@ -852,6 +874,12 @@ def red_number_forced_font_for_standalone_patch(
             out["force_edge_variant"] = BODY_NATIVE_FORCE_EDGE_VARIANT
         if BODY_NATIVE_FORCE_ALPHA_STRENGTH is not None:
             out["force_alpha_match_strength"] = BODY_NATIVE_FORCE_ALPHA_STRENGTH
+    else:
+        out["overlay_visual_dx"] = FEED_OVERLAY_VIEWS_DX
+        out["overlay_visual_dy"] = FEED_OVERLAY_VIEWS_DY
+        out["overlay_alpha_gain"] = FEED_OVERLAY_VIEWS_ALPHA_GAIN
+        out["overlay_alpha_gamma"] = FEED_OVERLAY_VIEWS_ALPHA_GAMMA
+        out["overlay_color"] = (255, 255, 255)
     return out
 
 
@@ -1290,6 +1318,19 @@ def composite_text_mask(image, mask, color):
     return Image.composite(text_layer, image, mask)
 
 
+def adjust_mask_alpha(mask, *, gain: float = 1.0, gamma: float = 1.0):
+    import numpy as np
+    from PIL import Image
+
+    arr = np.array(mask, dtype=np.float32) / 255.0
+    if gamma != 1.0:
+        arr = np.power(arr, gamma)
+    if gain != 1.0:
+        arr *= gain
+    arr = np.clip(arr, 0.0, 1.0)
+    return Image.fromarray(np.round(arr * 255).astype(np.uint8), mode="L")
+
+
 def _metric_text_has_percent(text: str) -> bool:
     """``%`` combines tight counters + diagonal; horizontal embolden masks merge into a blob."""
 
@@ -1425,6 +1466,13 @@ def draw_text_with_calibration(image, ink_rect: Dict[str, int], text: str, style
         position,
         font_path_hint=str(fp_cal) if fp_cal else None,
     )
+    if calibration.get("overlay_direct_mask"):
+        mask = adjust_mask_alpha(
+            base_mask,
+            gain=float(calibration.get("overlay_alpha_gain", 1.0)),
+            gamma=float(calibration.get("overlay_alpha_gamma", 1.0)),
+        )
+        return composite_text_mask(image, mask, calibration.get("overlay_color", style["color"]))
     target_style = {
         "density": style["density"],
         "edge_ratio": style["edge_ratio"],
@@ -2382,6 +2430,13 @@ def patch_ocr_rect_with_glyphs(
             calibration["force_alpha_match_strength"] = effective_forced_font["force_alpha_match_strength"]
         if "font_match" in effective_forced_font:
             calibration["font_match"] = effective_forced_font["font_match"]
+        if overlay_views_ink:
+            calibration["overlay_direct_mask"] = True
+            calibration["dx"] = int(effective_forced_font.get("overlay_visual_dx", calibration.get("dx", 0)))
+            calibration["dy"] = int(effective_forced_font.get("overlay_visual_dy", calibration.get("dy", 0)))
+            calibration["overlay_alpha_gain"] = effective_forced_font.get("overlay_alpha_gain", 1.0)
+            calibration["overlay_alpha_gamma"] = effective_forced_font.get("overlay_alpha_gamma", 1.0)
+            calibration["overlay_color"] = effective_forced_font.get("overlay_color", style.get("color", (255, 255, 255)))
     if overlay_views_ink:
         cal_font = load_font_by_path(calibration.get("font_path", ""), calibration["font_size"])
         if cal_font is None:

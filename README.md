@@ -45,16 +45,15 @@ PYTHONPATH=. python -m data_polisher.cli \
 
 * `REDNumber-Bold.otf`：详细数据区的大号指标数字，如曝光数、观看数、点击率、互动率。用于替代原先的截图字形，保证详情区数字统一、接近小红书数据页样式。
 * `REDNumber-Regular.ttf` / `REDNumber-Medium.ttf`：顶部小眼睛观看数的候选字体。顶部栏数字比详情区小、更轻，逻辑会优先用 Regular / Medium，而不是 Bold。
-* `DIN-OT-Medium.ttf`：两个地方生效：
-  * 百分号 `%` 单独用 DIN 渲染，再和 RED Number 数字拼接，避免 RED Number 没有合适百分号或百分号过粗。
-  * 信息流封面左下角“小眼睛”白色浏览数字优先用 DIN。这个位置的 `8/0` 很小，RED Number 在小尺寸下容易显粗，DIN 更窄、更清爽。
+* `DIN-OT-Medium.ttf`：百分号 `%` 单独用 DIN 渲染，再和 RED Number 数字拼接，避免 RED Number 没有合适百分号或百分号过粗。
+* `jlm_cmss10.ttf`：信息流封面左下角“小眼睛”白色浏览数字。按样本 `40` 逐字体比对后，它的窄身轻字重比 DIN / RED Number 更贴近原图。
 
 字体选择入口主要在 `data_polisher/cli.py`：
 
 * `BODY_NATIVE_FONT_PATH`：详细数据区主字体，优先 `REDNumber-Bold.otf`。
 * `build_header_views_forced_font()`：顶部小眼睛观看数，优先 Regular / Medium，并带 `HEADER_VIEWS_FONT_ADJUST = -2` 的小号修正。
-* `red_number_forced_font_for_standalone_patch(..., overlay_views_ink=True)`：信息流封面小眼睛浏览数，优先 `DIN-OT-Medium.ttf`。
-* `choose_feed_overlay_font_size()`：信息流小眼睛专用字号选择，同时约束亮字墨迹高度和原数字槽宽，避免三种问题：太大、太小、`80` 过粗。
+* `red_number_forced_font_for_standalone_patch(..., overlay_views_ink=True)`：信息流封面小眼睛浏览数，优先 `jlm_cmss10.ttf`，并使用按样张微调过的字号、位移和 alpha。
+* `choose_feed_overlay_font_size()`：信息流小眼睛专用字号选择；对已校准的 `jlm_cmss10.ttf` 固定使用视觉确认后的字号。
 
 ### 详细数据 Tab 如何定位
 
@@ -91,7 +90,7 @@ PYTHONPATH=. python -m data_polisher.cli \
    * 如果有可用 row atlas，优先用原图同行字符像素拼新数字。
    * 详情区默认强制 RED Number Bold，并用原图墨迹高度校准字号。
    * 顶部小眼睛用更轻的小号 RED Number。
-   * 信息流封面小眼睛用 DIN，并用 `choose_feed_overlay_font_size()` 控制小字号下的高度、宽度和粗细。
+   * 信息流封面小眼睛用 `jlm_cmss10.ttf`，并走专用的细 alpha 白字渲染，避免遮挡小眼睛图标。
 4. 最后按原文字颜色、alpha 分布、边缘风格做 mask 匹配，让新字的锯齿和透明度尽量贴近原图。
 
 ### 范围输入与位数限制

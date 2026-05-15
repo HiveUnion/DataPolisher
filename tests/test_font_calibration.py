@@ -65,7 +65,7 @@ class FontCalibrationTests(unittest.TestCase):
         self.assertEqual(cli.BODY_NATIVE_FORCE_EDGE_VARIANT, "w1x:quantized")
         self.assertEqual(cli.BODY_NATIVE_FORCE_ALPHA_STRENGTH, 0.25)
 
-    def test_feed_overlay_forced_font_prefers_din_overlay_digits(self):
+    def test_feed_overlay_forced_font_prefers_calibrated_overlay_digits(self):
         chosen = cli.red_number_forced_font_for_standalone_patch(
             ink_rect={"x": 0, "y": 0, "width": 18, "height": 12},
             original_text="40",
@@ -73,14 +73,22 @@ class FontCalibrationTests(unittest.TestCase):
             overlay_views_ink=True,
         )
 
-        if cli.BUNDLED_DIN_PERCENT.is_file():
-            self.assertTrue(str(chosen["font_path"]).endswith("DIN-OT-Medium.ttf"))
+        if cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT.is_file():
+            self.assertTrue(str(chosen["font_path"]).endswith("jlm_cmss10.ttf"))
             expected_size = cli.choose_feed_overlay_font_size(
-                str(cli.BUNDLED_DIN_PERCENT),
+                str(cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT),
                 ["40", "94"],
                 {"x": 0, "y": 0, "width": 18, "height": 12},
             )
             self.assertEqual(chosen["font_size"], expected_size)
+            self.assertEqual(chosen["font_size"], 17)
+            self.assertEqual(chosen["overlay_visual_dx"], cli.FEED_OVERLAY_VIEWS_DX)
+            self.assertEqual(chosen["overlay_visual_dy"], cli.FEED_OVERLAY_VIEWS_DY)
+            self.assertEqual(chosen["overlay_alpha_gamma"], cli.FEED_OVERLAY_VIEWS_ALPHA_GAMMA)
+            font = cli.load_font_by_path(str(chosen["font_path"]), chosen["font_size"])
+            bbox = cli.rendered_ink_bbox("90", font)
+            self.assertLessEqual(bbox[3] - bbox[1], 12)
+            self.assertLessEqual(bbox[2] - bbox[0], 18)
 
     def test_body_font_matching_prefers_closer_digit_widths(self):
         from data_polisher.red_number_fonts import RED_NUMBER_BOLD
