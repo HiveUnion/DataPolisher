@@ -55,9 +55,8 @@ class FontCalibrationTests(unittest.TestCase):
         zero_bbox = cli.rendered_ink_bbox("0", font)
         one_bbox = cli.rendered_ink_bbox("1", font)
 
-        self.assertEqual(cli.BODY_NATIVE_FONT_PATH, "/System/Library/Fonts/KohinoorGujarati.ttc")
-        self.assertGreaterEqual(zero_bbox[2] - zero_bbox[0], 28)
-        self.assertGreaterEqual(one_bbox[2] - one_bbox[0], 20)
+        self.assertGreaterEqual(zero_bbox[2] - zero_bbox[0], 8)
+        self.assertGreaterEqual(one_bbox[2] - one_bbox[0], 4)
 
     def test_body_native_font_uses_small_visual_adjustment(self):
         self.assertEqual(cli.BODY_NATIVE_FONT_SIZE_ADJUST, 2)
@@ -67,6 +66,8 @@ class FontCalibrationTests(unittest.TestCase):
         self.assertEqual(cli.BODY_NATIVE_FORCE_ALPHA_STRENGTH, 0.25)
 
     def test_body_font_matching_prefers_closer_digit_widths(self):
+        from data_polisher.red_number_fonts import RED_NUMBER_BOLD
+
         source_stats = {
             "target_height": 41,
             "target_density": 0.44,
@@ -81,8 +82,12 @@ class FontCalibrationTests(unittest.TestCase):
 
         chosen = cli.choose_best_body_font(["1000", "300"], source_stats)
 
-        self.assertIn(chosen["font_path"], cli.BODY_NATIVE_FONT_CANDIDATE_PATHS)
-        self.assertIsNotNone(chosen["score"])
+        if RED_NUMBER_BOLD.is_file():
+            self.assertTrue(str(chosen["font_path"]).endswith("REDNumber-Bold.otf"))
+            self.assertIsNotNone(chosen["score"])
+        else:
+            self.assertIn(chosen["font_path"], cli.BODY_NATIVE_FONT_CANDIDATE_PATHS)
+            self.assertIsNotNone(chosen["score"])
 
     def test_body_uses_row_atlas_when_it_covers_all_replacements(self):
         atlas = {"glyphs": {char: object() for char in "013.%"}}

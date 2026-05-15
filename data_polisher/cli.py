@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import statistics
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -17,8 +19,22 @@ from .core import (
 )
 from .ocr import detect_bounds_with_paddle, detect_items_with_paddle
 from .template import BASE_SIZE, NORMAL_FIELDS
+from .red_number_fonts import (
+    RED_NUMBER_BOLD,
+    RED_NUMBER_MEDIUM,
+    RED_NUMBER_REGULAR,
+    bundled_font_paths_in_order,
+    path_for_pil_weight,
+    prefer_red_number_metric_render,
+)
 
-FONT_CANDIDATE_PATHS = [
+_PKG_STATIC_FONTS = Path(__file__).resolve().parent / "static" / "fonts"
+# DIN ``%`` from 小红书 APK — geometric sans, closer to analytics cards than 苹方.
+BUNDLED_DIN_PERCENT = _PKG_STATIC_FONTS / "DIN-OT-Medium.ttf"
+
+_FONT_EXTRA = bundled_font_paths_in_order()
+
+FONT_CANDIDATE_PATHS = _FONT_EXTRA + [
     "/System/Library/Fonts/KohinoorGujarati.ttc",
     "/System/Library/Fonts/SFNS.ttf",
     "/System/Library/Fonts/SFNSRounded.ttf",
@@ -27,8 +43,10 @@ FONT_CANDIDATE_PATHS = [
     "/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf",
 ]
 
-BODY_NATIVE_FONT_PATH = "/System/Library/Fonts/KohinoorGujarati.ttc"
-BODY_NATIVE_FONT_CANDIDATE_PATHS = [
+BODY_NATIVE_FONT_PATH = (
+    str(RED_NUMBER_BOLD) if RED_NUMBER_BOLD.is_file() else "/System/Library/Fonts/KohinoorGujarati.ttc"
+)
+BODY_NATIVE_FONT_CANDIDATE_PATHS = _FONT_EXTRA + [
     "/System/Library/Fonts/KohinoorGujarati.ttc",
     "/System/Library/Fonts/Avenir Next.ttc",
     "/System/Library/Fonts/SFNS.ttf",
@@ -41,6 +59,8 @@ BODY_NATIVE_FONT_CANDIDATE_PATHS = [
 BODY_NATIVE_FONT_SIZE_ADJUST = 2
 BODY_NATIVE_FORCE_EDGE_VARIANT = "w1x:quantized"
 BODY_NATIVE_FORCE_ALPHA_STRENGTH = 0.25
+# 顶部小眼睛：字形更小、偏中等字重，不使用详情 Bold + 笔画预设。
+HEADER_VIEWS_FONT_ADJUST = -2
 
 
 def load_optional_cv2():
@@ -256,6 +276,15 @@ def inpaint_overlay_views_translucent_fill(
 def load_font(size: int, weight: str):
     from PIL import ImageFont
 
+    from .red_number_fonts import path_for_pil_weight
+
+    bundled = path_for_pil_weight(weight if weight in ("bold", "medium", "regular", "normal") else "medium")
+    if bundled is not None:
+        try:
+            return ImageFont.truetype(str(bundled), size=size)
+        except Exception:
+            pass
+
     candidates = [
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if weight == "bold" else "",
@@ -282,8 +311,14 @@ def load_font_by_path(path: str, size: int):
 
 
 def iter_candidate_fonts(size: int):
+    """Fonts tried during RMSE calibration. Prefer bundled RED Number only when present."""
+
+    from .red_number_fonts import bundled_font_paths_in_order
+
     yielded = False
-    for path in FONT_CANDIDATE_PATHS:
+    bundled = bundled_font_paths_in_order()
+    paths = bundled if bundled else FONT_CANDIDATE_PATHS
+    for path in paths:
         if not Path(path).exists():
             continue
         font = load_font_by_path(path, size)
@@ -310,6 +345,191 @@ def rendered_ink_bbox(text: str, font):
         bbox[2] - origin[0],
         bbox[3] - origin[1],
     )
+
+
+def _metric_text_segments(text: str) -> list[str]:
+    return [p for p in re.split(r"(%)", str(text)) if p]
+
+
+def _weight_from_font_path(font_path: Optional[str]) -> str:
+    if not font_path:
+        return "medium"
+    lower = str(font_path).lower()
+    if "bold" in lower:
+        return "bold"
+    return "medium"
+
+
+def load_font_symbol_fallback(size: int, weight: str):
+    """Fonts that include ``%`` (U+0025). RED Number omits it — PIL draws a black tofu otherwise."""
+
+    from PIL import ImageFont
+
+    paths: List[Tuple[str, Optional[int]]] = [
+        ("/System/Library/Fonts/PingFang.ttc", 0),
+    ]
+    if weight == "bold":
+        paths.append(("/System/Library/Fonts/Supplemental/Arial Bold.ttf", None))
+    else:
+        paths.append(("/System/Library/Fonts/Supplemental/Arial.ttf", None))
+    paths.append(("C:/Windows/Fonts/msyh.ttc", None))
+    if weight == "bold":
+        paths.append(("C:/Windows/Fonts/arialbd.ttf", None))
+    else:
+        paths.append(("C:/Windows/Fonts/arial.ttf", None))
+    for path, idx in paths:
+        if not path or not Path(path).exists():
+            continue
+        try:
+            if idx is not None:
+                return ImageFont.truetype(path, size=size, index=idx)
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def load_percent_glyph_font(size: int, weight: str):
+    """Percent glyph only: bundled DIN-OT-Medium (has U+0025), pairs with RED Number digits."""
+
+    from PIL import ImageFont
+
+    eff = int(size)
+    if weight == "bold":
+        eff = max(eff, int(round(size * 1.04)))
+
+    if BUNDLED_DIN_PERCENT.is_file():
+        try:
+            return ImageFont.truetype(str(BUNDLED_DIN_PERCENT), size=eff)
+        except Exception:
+            pass
+    return load_font_symbol_fallback(size, weight)
+
+
+def load_red_metric_segment_font(size: int, weight: str):
+    """Digits / dot use bundled RED Number when available."""
+
+    from PIL import ImageFont
+
+    p = path_for_pil_weight(weight)
+    if p is not None and p.is_file():
+        try:
+            return ImageFont.truetype(str(p), size=size)
+        except Exception:
+            pass
+    return load_font_symbol_fallback(size, weight)
+
+
+def _use_red_percent_hybrid(
+    text: str,
+    *,
+    font=None,
+    font_path_hint: Optional[str] = None,
+) -> bool:
+    """Paint ``%`` with DIN bundle (or symbol fallback) when digits use RED Number."""
+
+    if "%" not in str(text) or not RED_NUMBER_BOLD.is_file():
+        return False
+    if font_path_hint and "REDNumber" in str(font_path_hint):
+        return True
+    p = getattr(font, "path", None)
+    return bool(p and "REDNumber" in str(p))
+
+
+def _advance_text_cursor(draw, x: int, y: int, part: str, seg_font) -> int:
+    try:
+        bb = draw.textbbox((x, y), part, font=seg_font)
+        return int(bb[2])
+    except Exception:
+        bb = rendered_ink_bbox(part, seg_font)
+        return x + max(0, bb[2] - bb[0])
+
+
+@lru_cache(maxsize=128)
+def _percent_vertical_nudge_px(size: int, weight: str) -> int:
+    """Extra Y (down) for the ``%`` glyph so DIN/回退字体与 RED 数字视觉中线对齐。
+
+    默认锚点下 % 的 ink 往往偏上；按与「8」的 ink 中心差自动下移。
+    """
+
+    from PIL import Image, ImageDraw
+
+    if size < 1:
+        return 0
+    try:
+        rf = load_red_metric_segment_font(size, weight)
+        pf = load_percent_glyph_font(size, weight)
+    except Exception:
+        return max(0, int(round(size * 0.06)))
+
+    ox, oy = 40, 60
+    im8 = Image.new("L", (240, 180), 0)
+    ImageDraw.Draw(im8).text((ox, oy), "8", font=rf, fill=255)
+    bb8 = im8.getbbox()
+    imp = Image.new("L", (240, 180), 0)
+    ImageDraw.Draw(imp).text((ox, oy), "%", font=pf, fill=255)
+    bbp = imp.getbbox()
+    if not bb8 or not bbp:
+        return max(0, int(round(size * 0.06)))
+    c8 = (bb8[1] + bb8[3]) / 2.0
+    cp = (bbp[1] + bbp[3]) / 2.0
+    return int(round(c8 - cp))
+
+
+def draw_metric_red_plus_percent(draw, origin_xy: Tuple[int, int], text: str, size: int, weight: str, fill) -> None:
+    x0, y0 = origin_xy
+    x = int(x0)
+    nudge_y = _percent_vertical_nudge_px(size, weight)
+    for part in _metric_text_segments(text):
+        seg_font = (
+            load_percent_glyph_font(size, weight) if part == "%" else load_red_metric_segment_font(size, weight)
+        )
+        y_part = y0 + (nudge_y if part == "%" else 0)
+        draw.text((x, y_part), part, font=seg_font, fill=fill)
+        x = _advance_text_cursor(draw, x, y_part, part, seg_font)
+
+
+def rendered_ink_bbox_red_percent_split(text: str, size: int, weight: str) -> Tuple[int, int, int, int]:
+    from PIL import Image, ImageDraw
+
+    origin = (40, 40)
+    image = Image.new("L", (520, 160), 0)
+    draw = ImageDraw.Draw(image)
+    draw_metric_red_plus_percent(draw, origin, text, size, weight, 255)
+    bbox = image.getbbox()
+    if bbox is None:
+        return (0, 0, 0, 0)
+    return (
+        bbox[0] - origin[0],
+        bbox[1] - origin[1],
+        bbox[2] - origin[0],
+        bbox[3] - origin[1],
+    )
+
+
+def rendered_ink_stats_red_percent_split(text: str, size: int, weight: str):
+    from PIL import Image, ImageDraw
+
+    origin = (40, 40)
+    image = Image.new("L", (520, 160), 0)
+    draw = ImageDraw.Draw(image)
+    draw_metric_red_plus_percent(draw, origin, text, size, weight, 255)
+    bbox = image.getbbox()
+    if bbox is None:
+        return {"bbox": (0, 0, 0, 0), "density": 0}
+    crop = image.crop(bbox)
+    values = list(crop.getdata())
+    ink_count = sum(1 for value in values if value > 24)
+    area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+    return {
+        "bbox": (
+            bbox[0] - origin[0],
+            bbox[1] - origin[1],
+            bbox[2] - origin[0],
+            bbox[3] - origin[1],
+        ),
+        "density": ink_count / area,
+    }
 
 
 def _overlay_views_left_nudge_px(original_text: str, new_text: str, *, font) -> int:
@@ -456,13 +676,36 @@ def weight_mask_variants(mask):
 
 
 def fit_font_to_ink(text: str, target_rect: Dict[str, int], target_density: float):
+    """Return ``(font, ink_bbox, weight)``. Hybrid RED+% uses RED cmap-safe sizing."""
+
     target_height = max(1, target_rect["height"])
     best = None
+
+    if "%" in str(text) and RED_NUMBER_BOLD.is_file():
+        for size in range(8, 72):
+            for weight in ("regular", "medium", "bold"):
+                stats = rendered_ink_stats_red_percent_split(str(text), size, weight)
+                bbox = stats["bbox"]
+                height = bbox[3] - bbox[1]
+                width = bbox[2] - bbox[0]
+                height_score = abs(height - target_height) * 2.0
+                density_score = abs(stats["density"] - target_density) * 18.0
+                width_score = abs(width - target_rect["width"]) * 0.04
+                score = height_score + density_score + width_score
+                if best is None or score < best[0]:
+                    font = load_red_metric_segment_font(size, weight)
+                    best = (score, font, bbox, weight)
+
+        if best is None:
+            fb = load_percent_glyph_font(max(8, target_height), "bold")
+            return fb, rendered_ink_bbox(str(text), fb), "bold"
+
+        return best[1], best[2], best[3]
 
     for size in range(8, 72):
         for weight in ("regular", "medium", "bold"):
             font = load_font(size, weight)
-            stats = rendered_ink_stats(text, font)
+            stats = rendered_ink_stats(str(text), font)
             bbox = stats["bbox"]
             height = bbox[3] - bbox[1]
             width = bbox[2] - bbox[0]
@@ -471,13 +714,13 @@ def fit_font_to_ink(text: str, target_rect: Dict[str, int], target_density: floa
             width_score = abs(width - target_rect["width"]) * 0.04
             score = height_score + density_score + width_score
             if best is None or score < best[0]:
-                best = (score, font, bbox)
+                best = (score, font, bbox, weight)
 
     if best is None:
-        font = load_font(target_height, weight)
-        return font, rendered_ink_bbox(text, font)
+        font = load_font(target_height, "bold")
+        return font, rendered_ink_bbox(str(text), font), "bold"
 
-    return best[1], best[2]
+    return best[1], best[2], best[3]
 
 
 def choose_font_size_for_rendered_height(font_path: str, texts, target_height: int) -> int:
@@ -490,6 +733,7 @@ def choose_font_size_for_rendered_height(font_path: str, texts, target_height: i
     matches the source row.
     """
     target_height = max(1, int(target_height))
+    weight = _weight_from_font_path(font_path)
     best = None
     for size in range(max(8, target_height), min(96, target_height * 2 + 24) + 1):
         font = load_font_by_path(font_path, size)
@@ -497,7 +741,11 @@ def choose_font_size_for_rendered_height(font_path: str, texts, target_height: i
             font = load_font(size, "bold")
         heights = []
         for text in texts:
-            bbox = rendered_ink_bbox(str(text), font)
+            ts = str(text)
+            if "%" in ts and _use_red_percent_hybrid(ts, font_path_hint=str(font_path), font=font):
+                bbox = rendered_ink_bbox_red_percent_split(ts, size, weight)
+            else:
+                bbox = rendered_ink_bbox(ts, font)
             height = bbox[3] - bbox[1]
             if height > 0:
                 heights.append(height)
@@ -510,6 +758,97 @@ def choose_font_size_for_rendered_height(font_path: str, texts, target_height: i
     return best[1] if best else target_height
 
 
+def red_number_forced_font_for_standalone_patch(
+    *,
+    ink_rect: Dict[str, int],
+    original_text: str,
+    new_text: str,
+    overlay_views_ink: bool,
+) -> Optional[Dict]:
+    """Force bundled RED Number for single-field patches (顶部观看数、信息流小眼睛叠加).
+
+    详情区多块指标已在 ``beautify_normal_with_ocr`` 里用 ``body_forced_font``；此处对齐同一字形。
+    封面浅色叠加不套用 ``BODY_NATIVE_FORCE_EDGE_VARIANT``，便于按浅色笔画匹配边缘。
+    """
+
+    if not prefer_red_number_metric_render():
+        return None
+    ot = normalize_metric_text(original_text)
+    nt = normalize_metric_text(str(new_text))
+    if not is_pure_metric_text(nt) or not ot:
+        return None
+    if not any(ch.isdigit() for ch in ot):
+        return None
+
+    fp = str(BODY_NATIVE_FONT_PATH)
+    if not Path(fp).is_file():
+        return None
+
+    target_h = max(8, int(ink_rect["height"]))
+    texts_for_size = list(dict.fromkeys([ot, nt]))
+    font_size = max(
+        8,
+        int(choose_font_size_for_rendered_height(fp, texts_for_size, target_h))
+        + BODY_NATIVE_FONT_SIZE_ADJUST,
+    )
+    out: Dict = {
+        "font_size": font_size,
+        "font_path": fp,
+        "font_match": {
+            "target_height": target_h,
+            "matched_chars": len(nt),
+            "standalone_red_patch": True,
+        },
+    }
+    if not overlay_views_ink:
+        if BODY_NATIVE_FORCE_EDGE_VARIANT is not None:
+            out["force_edge_variant"] = BODY_NATIVE_FORCE_EDGE_VARIANT
+        if BODY_NATIVE_FORCE_ALPHA_STRENGTH is not None:
+            out["force_alpha_match_strength"] = BODY_NATIVE_FORCE_ALPHA_STRENGTH
+    return out
+
+
+def build_header_views_forced_font(
+    *,
+    ink_rect: Dict[str, int],
+    original_text: str,
+    new_text: str,
+) -> Optional[Dict]:
+    """顶部「小眼睛」旁数字：RED Number Medium / Regular，匹配小号灰色正文而非详情粗重红数字。"""
+
+    if not prefer_red_number_metric_render():
+        return None
+    ot = normalize_metric_text(original_text)
+    nt = normalize_metric_text(str(new_text))
+    if not is_pure_metric_text(nt) or not ot or not any(ch.isdigit() for ch in ot):
+        return None
+
+    fp: Optional[str] = None
+    for candidate in (RED_NUMBER_REGULAR, RED_NUMBER_MEDIUM, RED_NUMBER_BOLD):
+        if candidate.is_file():
+            fp = str(candidate)
+            break
+    if not fp:
+        return None
+
+    target_h = max(8, int(ink_rect["height"]))
+    texts_for_size = list(dict.fromkeys([ot, nt]))
+    chosen = choose_font_size_for_rendered_height(fp, texts_for_size, target_h)
+    # 顶部栏视觉高度≈12–14px：PIL 常用字号易偏大，按墨迹高度收紧上限。
+    stretch = 1.06 + 0.05 * max(0, len(nt) - 2)
+    cap_px = max(10, int(round(target_h * stretch)))
+    font_size = max(8, min(chosen + HEADER_VIEWS_FONT_ADJUST, cap_px))
+    return {
+        "font_size": font_size,
+        "font_path": fp,
+        "font_match": {
+            "target_height": target_h,
+            "matched_chars": len(nt),
+            "header_views": True,
+        },
+    }
+
+
 def _median(values) -> float:
     if not values:
         return 0.0
@@ -518,8 +857,19 @@ def _median(values) -> float:
 
 
 def choose_best_body_font(texts, source_stats: Dict[str, object]) -> Dict[str, object]:
-    """Pick the native font whose digit geometry best matches source samples."""
+    """Pick font for body metric digits. Prefer bundled RED Number over geometry-matched system fonts."""
+
     target_height = int(source_stats.get("target_height") or 1)
+    if RED_NUMBER_BOLD.is_file():
+        fp = str(RED_NUMBER_BOLD)
+        return {
+            "font_path": fp,
+            "font_size": choose_font_size_for_rendered_height(fp, texts, target_height),
+            "score": 0.0,
+            "matched_chars": len(source_stats.get("char_widths") or {}),
+            "target_height": target_height,
+        }
+
     target_density = float(source_stats.get("target_density") or 0)
     target_edge_ratio = float(source_stats.get("target_edge_ratio") or 0)
     char_widths = source_stats.get("char_widths") or {}
@@ -535,7 +885,11 @@ def choose_best_body_font(texts, source_stats: Dict[str, object]) -> Dict[str, o
 
         heights = []
         for text in texts:
-            bbox = rendered_ink_bbox(str(text), font)
+            ts = str(text)
+            if "%" in ts and _use_red_percent_hybrid(ts, font_path_hint=str(font_path), font=font):
+                bbox = rendered_ink_bbox_red_percent_split(ts, font_size, _weight_from_font_path(font_path))
+            else:
+                bbox = rendered_ink_bbox(ts, font)
             heights.append(bbox[3] - bbox[1])
         score = abs(_median(heights) - target_height) * 1.25
 
@@ -543,7 +897,11 @@ def choose_best_body_font(texts, source_stats: Dict[str, object]) -> Dict[str, o
         for char, widths in char_widths.items():
             if not widths:
                 continue
-            bbox = rendered_ink_bbox(str(char), font)
+            if char == "%":
+                fb = load_percent_glyph_font(font_size, _weight_from_font_path(font_path))
+                bbox = rendered_ink_bbox(str(char), fb)
+            else:
+                bbox = rendered_ink_bbox(str(char), font)
             rendered_width = bbox[2] - bbox[0]
             source_width = _median(widths)
             score += abs(rendered_width - source_width) * 2.0
@@ -552,12 +910,17 @@ def choose_best_body_font(texts, source_stats: Dict[str, object]) -> Dict[str, o
         if target_density > 0:
             styles = []
             for text in texts:
-                bbox = rendered_ink_bbox(str(text), font)
+                ts = str(text)
+                if "%" in ts and _use_red_percent_hybrid(ts, font_path_hint=str(font_path), font=font):
+                    bbox = rendered_ink_bbox_red_percent_split(ts, font_size, _weight_from_font_path(font_path))
+                else:
+                    bbox = rendered_ink_bbox(ts, font)
                 mask = text_mask_for_candidate(
                     (420, 160),
-                    str(text),
+                    ts,
                     font,
                     (40 - bbox[0], 40 - bbox[1]),
+                    font_path_hint=str(font_path),
                 )
                 target_style = {
                     "density": target_density,
@@ -661,7 +1024,12 @@ def draw_text(image, rect: Dict[str, int], text: str, field_config: Dict[str, ob
         {"width": image.width, "height": image.height},
     )
     position = (text_point["x"], text_point["y"] - font_size)
-    draw.text(position, text, fill=(34, 34, 34), font=font)
+    weight = str(field_config.get("font_weight", "medium"))
+    red_hint = path_for_pil_weight(weight)
+    if _use_red_percent_hybrid(str(text), font_path_hint=str(red_hint) if red_hint else ""):
+        draw_metric_red_plus_percent(draw, position, str(text), font_size, weight, (34, 34, 34))
+    else:
+        draw.text(position, text, fill=(34, 34, 34), font=font)
     return image
 
 
@@ -800,12 +1168,17 @@ def edge_mask_variants(mask):
 def draw_text_in_ocr_rect(image, rect: Dict[str, int], text: str, style):
     from PIL import Image, ImageDraw
 
-    font, bbox = fit_font_to_ink(text, rect, style["density"])
+    font, bbox, weight_fit = fit_font_to_ink(text, rect, style["density"])
     position = (rect["x"] - bbox[0], rect["y"] - bbox[1])
     mask = Image.new("L", image.size, 0)
     mask_draw = ImageDraw.Draw(mask)
-    mask_draw.text(position, text, fill=255, font=font)
-    mask = tune_mask_weight(mask, style["density"])
+    if "%" in str(text) and RED_NUMBER_BOLD.is_file():
+        sz = int(getattr(font, "size", max(8, rect["height"])))
+        draw_metric_red_plus_percent(mask_draw, position, str(text), sz, weight_fit, 255)
+    else:
+        mask_draw.text(position, text, fill=255, font=font)
+    if not _metric_text_has_percent(text):
+        mask = tune_mask_weight(mask, style["density"])
     mask_variants = edge_mask_variants(mask)
     target_style = {
         "density": style["density"],
@@ -847,12 +1220,19 @@ def patch_rmse(left, right):
     return math.sqrt(mse)
 
 
-def text_mask_for_candidate(image_size, text: str, font, position):
+def text_mask_for_candidate(
+    image_size, text: str, font, position, font_path_hint: Optional[str] = None
+):
     from PIL import Image, ImageDraw
 
     mask = Image.new("L", image_size, 0)
     draw = ImageDraw.Draw(mask)
-    draw.text(position, text, fill=255, font=font)
+    if "%" in str(text) and _use_red_percent_hybrid(text, font=font, font_path_hint=font_path_hint):
+        size = int(getattr(font, "size", 22))
+        weight = _weight_from_font_path(font_path_hint)
+        draw_metric_red_plus_percent(draw, position, str(text), size, weight, 255)
+    else:
+        draw.text(position, text, fill=255, font=font)
     return mask
 
 
@@ -861,6 +1241,12 @@ def composite_text_mask(image, mask, color):
 
     text_layer = Image.new("RGB", image.size, color)
     return Image.composite(text_layer, image, mask)
+
+
+def _metric_text_has_percent(text: str) -> bool:
+    """``%`` combines tight counters + diagonal; horizontal embolden masks merge into a blob."""
+
+    return "%" in str(text)
 
 
 def candidate_offsets(height: int):
@@ -897,7 +1283,12 @@ def calibrate_text_render(source_image, clean_image, ink_rect: Dict[str, int], o
 
     for size in range(size_min, size_max + 1):
         for font_path, font in iter_candidate_fonts(size):
-            stats = rendered_ink_stats(original_text, font)
+            if _use_red_percent_hybrid(original_text, font=font, font_path_hint=str(font_path)):
+                stats = rendered_ink_stats_red_percent_split(
+                    original_text, size, _weight_from_font_path(str(font_path))
+                )
+            else:
+                stats = rendered_ink_stats(original_text, font)
             bbox = stats["bbox"]
             rendered_height = bbox[3] - bbox[1]
             if rendered_height <= 0 or abs(rendered_height - target_height) > max(3, target_height * 0.18):
@@ -909,8 +1300,18 @@ def calibrate_text_render(source_image, clean_image, ink_rect: Dict[str, int], o
                         full_position[0] - target_patch_rect["x"],
                         full_position[1] - target_patch_rect["y"],
                     )
-                    base_mask = text_mask_for_candidate(target_patch.size, original_text, font, local_position)
+                    base_mask = text_mask_for_candidate(
+                        target_patch.size,
+                        original_text,
+                        font,
+                        local_position,
+                        font_path_hint=str(font_path),
+                    )
                     for variant_name, strength, mask in candidate_masks(base_mask, style):
+                        if _metric_text_has_percent(original_text):
+                            prefix = variant_name.split(":")[0]
+                            if prefix in ("w1x", "w1xy", "w2"):
+                                continue
                         candidate_patch = composite_text_mask(clean_patch, mask, style["color"])
                         rmse = patch_rmse(target_patch, candidate_patch)
                         candidate_style = mask_style(mask)
@@ -937,7 +1338,7 @@ def calibrate_text_render(source_image, clean_image, ink_rect: Dict[str, int], o
                                 "target_patch_rect": target_patch_rect,
                             }
     if best is None:
-        font, bbox = fit_font_to_ink(original_text, ink_rect, style["density"])
+        _, bbox, _ = fit_font_to_ink(original_text, ink_rect, style["density"])
         best = {
             "score": None,
             "rmse": None,
@@ -960,12 +1361,23 @@ def draw_text_with_calibration(image, ink_rect: Dict[str, int], text: str, style
     font = load_font_by_path(calibration.get("font_path", ""), calibration["font_size"])
     if font is None:
         font = load_font(calibration["font_size"], "bold")
-    bbox = rendered_ink_bbox(text, font)
+    fp_cal = calibration.get("font_path", "") or ""
+    weight_cal = _weight_from_font_path(str(fp_cal) if fp_cal else None)
+    if _use_red_percent_hybrid(str(text), font=font, font_path_hint=str(fp_cal) if fp_cal else None):
+        bbox = rendered_ink_bbox_red_percent_split(str(text), int(calibration["font_size"]), weight_cal)
+    else:
+        bbox = rendered_ink_bbox(text, font)
     position = (
         ink_rect["x"] + calibration["dx"] - bbox[0],
         ink_rect["y"] + calibration["dy"] - bbox[1],
     )
-    base_mask = text_mask_for_candidate(image.size, text, font, position)
+    base_mask = text_mask_for_candidate(
+        image.size,
+        text,
+        font,
+        position,
+        font_path_hint=str(fp_cal) if fp_cal else None,
+    )
     target_style = {
         "density": style["density"],
         "edge_ratio": style["edge_ratio"],
@@ -974,6 +1386,10 @@ def draw_text_with_calibration(image, ink_rect: Dict[str, int], text: str, style
     best = None
     forced_variant = calibration.get("force_edge_variant")
     forced_strength = calibration.get("force_alpha_match_strength")
+    if _metric_text_has_percent(text):
+        # Forced w1x-style masks bridge the two circles of ``%`` into a solid ink blob.
+        forced_variant = None
+        forced_strength = None
     for variant_name, strength, mask in candidate_masks(base_mask, style):
         if forced_variant and variant_name != forced_variant:
             continue
@@ -1056,44 +1472,64 @@ def find_value_below_label(items, label: str):
     return candidates[0][1]
 
 
+def _header_row_date_like_ocr(raw: str) -> bool:
+    """顶部「日期」片（如 ``05-07``）与小眼睛/赞/评同一竖带，需排除。"""
+
+    s = str(raw).strip()
+    if not s:
+        return False
+    if any(ch in s for ch in ("-", "/", "—", "－")) and re.search(r"\d", s):
+        return True
+    if re.search(r"\d{1,2}\s*月\s*\d{1,2}", s):
+        return True
+    if "：" in s and re.search(r"\d", s) and len(normalize_metric_text(s)) >= 4:
+        return True
+    return False
+
+
 def find_header_view_value(items, image_size=None):
-    # Base search window designed for BASE_SIZE (460x997).
-    # Scale proportionally when a different resolution image is used.
+    """顶部笔记卡片「眼睛 / 赞 / 评」一行三个数：取 **从左数第一个** OCR 数字框。
+
+    左侧常有日期 ``MM-DD``，先剔除日期再按 ``x`` 排序，避免误选 ``05-07`` 或赞、评列。
+    """
+
     base_w = BASE_SIZE["width"]
     base_h = BASE_SIZE["height"]
     if image_size is not None:
         sx = image_size[0] / base_w
         sy = image_size[1] / base_h
+        img_w = image_size[0]
     else:
         sx = sy = 1.0
+        img_w = int(BASE_SIZE["width"])
 
     y_min = int(210 * sy)
     y_max = int(270 * sy)
-    x_min = int(100 * sx)
-    x_max = int(210 * sx)
-    # Allow a 30% slack on each side to absorb minor layout differences.
-    y_slack = int((y_max - y_min) * 0.3)
-    x_slack = int((x_max - x_min) * 0.3)
+    y_slack = int((y_max - y_min) * 0.35)
 
     candidates = []
     for item in items:
-        text = normalize_metric_text(item["text"])
-        rect = item["rect"]
-        if not text or "%" in text:
+        raw = str(item.get("text", ""))
+        if _header_row_date_like_ocr(raw):
             continue
+        nt = normalize_metric_text(raw)
+        if not nt or "%" in nt:
+            continue
+        rect = item["rect"]
         if rect["y"] < y_min - y_slack or rect["y"] > y_max + y_slack:
             continue
-        if rect["x"] < x_min - x_slack or rect["x"] > x_max + x_slack:
+        if rect["x"] < -8 or rect["x"] > img_w + 8:
             continue
-        candidates.append((rect["x"], item))
+        candidates.append(item)
 
     if not candidates:
         raise RuntimeError("OCR did not find header view count")
-    candidates.sort(key=lambda pair: pair[0])
-    return candidates[0][1]
+
+    candidates.sort(key=lambda it: it["rect"]["x"])
+    return candidates[0]
 
 
-def extract_metrics_from_items(items):
+def extract_metrics_from_items(items, image_size=None):
     labels = {
         "exposure": "曝光数",
         "views": "观看数",
@@ -1101,22 +1537,22 @@ def extract_metrics_from_items(items):
         "interaction_rate": "互动率",
     }
     result = {}
-    for key, label in labels.items():
+    for key, lbl in labels.items():
         try:
-            item = find_value_below_label(items, label)
+            item = find_value_below_label(items, lbl)
             result[key] = {
-                "label": label,
+                "label": lbl,
                 "text": normalize_metric_text(item["text"]),
                 "rect": item["rect"],
             }
         except RuntimeError:
             result[key] = {
-                "label": label,
+                "label": lbl,
                 "text": "",
                 "rect": None,
             }
     try:
-        item = find_header_view_value(items)
+        item = find_header_view_value(items, image_size=image_size)
         result["header_views"] = {
             "label": "顶部观看数",
             "text": normalize_metric_text(item["text"]),
@@ -1724,13 +2160,18 @@ def synthesize_metric_glyph_for_atlas(char: str, atlas):
     if not char:
         return None
     target_height = max(1, int(atlas.get("reference_height", 1)))
-    font_path = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
-    # Pick size by a full-height digit, then render every missing char with
-    # that same size so "." and "%" keep natural proportions.
-    font_size = choose_font_size_for_rendered_height(font_path, ["0", "8"], target_height)
-    font = load_font_by_path(font_path, font_size)
-    if font is None:
-        font = load_font(font_size, "bold")
+    digit_path = (
+        str(RED_NUMBER_BOLD)
+        if RED_NUMBER_BOLD.is_file()
+        else "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+    )
+    font_size = choose_font_size_for_rendered_height(digit_path, ["0", "8"], target_height)
+    if char == "%":
+        font = load_percent_glyph_font(font_size, "bold")
+    else:
+        font = load_font_by_path(digit_path, font_size)
+        if font is None:
+            font = load_font(font_size, "bold")
 
     bbox = rendered_ink_bbox(char, font)
     width = max(1, bbox[2] - bbox[0])
@@ -1821,6 +2262,19 @@ def patch_ocr_rect_with_glyphs(
 
     image_size = {"width": image.width, "height": image.height}
 
+    force_red_metrics = prefer_red_number_metric_render()
+
+    effective_forced_font = forced_font
+    if effective_forced_font is None and force_red_metrics and row_atlas is None:
+        auto_ff = red_number_forced_font_for_standalone_patch(
+            ink_rect=ink_rect,
+            original_text=original_text,
+            new_text=str(text),
+            overlay_views_ink=overlay_views_ink,
+        )
+        if auto_ff is not None:
+            effective_forced_font = auto_ff
+
     # Erase old glyphs: overlay uses minimal padding + capsule-toned fill (not wide edge slab).
     if overlay_views_ink:
         padded = expand_rect(ink_rect, 1, image_size)
@@ -1839,7 +2293,7 @@ def patch_ocr_rect_with_glyphs(
         padded = expand_rect(ink_rect, max(2, ink_rect["height"] // 5), image_size)
         image = inpaint_or_fill(image, padded)
 
-    if row_atlas is not None:
+    if row_atlas is not None and not force_red_metrics:
         glyph_ink = ink_rect
         if overlay_views_ink:
             probe_font = load_font(max(8, min(72, ink_rect["height"])), "bold")
@@ -1863,7 +2317,7 @@ def patch_ocr_rect_with_glyphs(
         if nx:
             glyph_rect = dict(ink_rect)
             glyph_rect["x"] = ink_rect["x"] + nx
-    if render_text_from_glyphs(image, glyph_rect, text, atlas):
+    if not force_red_metrics and render_text_from_glyphs(image, glyph_rect, text, atlas):
         return image, {"mode": "glyph"}
     style = extract_ink_style(source_image, ink_rect)
     if overlay_views_ink:
@@ -1871,16 +2325,16 @@ def patch_ocr_rect_with_glyphs(
         if lite:
             style["color"] = lite
     calibration = calibrate_text_render(source_image, image, ink_rect, original_text, style)
-    if forced_font:
-        calibration["font_size"] = forced_font["font_size"]
-        calibration["font_path"] = forced_font["font_path"]
+    if effective_forced_font:
+        calibration["font_size"] = effective_forced_font["font_size"]
+        calibration["font_path"] = effective_forced_font["font_path"]
         calibration["forced_font"] = True
-        if "force_edge_variant" in forced_font:
-            calibration["force_edge_variant"] = forced_font["force_edge_variant"]
-        if "force_alpha_match_strength" in forced_font:
-            calibration["force_alpha_match_strength"] = forced_font["force_alpha_match_strength"]
-        if "font_match" in forced_font:
-            calibration["font_match"] = forced_font["font_match"]
+        if "force_edge_variant" in effective_forced_font:
+            calibration["force_edge_variant"] = effective_forced_font["force_edge_variant"]
+        if "force_alpha_match_strength" in effective_forced_font:
+            calibration["force_alpha_match_strength"] = effective_forced_font["force_alpha_match_strength"]
+        if "font_match" in effective_forced_font:
+            calibration["font_match"] = effective_forced_font["font_match"]
     if overlay_views_ink:
         cal_font = load_font_by_path(calibration.get("font_path", ""), calibration["font_size"])
         if cal_font is None:
@@ -1997,9 +2451,12 @@ def beautify_normal_with_ocr(args, metrics, on_progress=None):
         if body_targets
         else 0
     )
-    body_atlas = build_row_atlas(source_image, items, body_y_anchor, y_tolerance=300)
-    if not should_use_body_row_atlas(body_atlas, [target[1] for target in body_targets]):
+    if prefer_red_number_metric_render():
         body_atlas = None
+    else:
+        body_atlas = build_row_atlas(source_image, items, body_y_anchor, y_tolerance=300)
+        if not should_use_body_row_atlas(body_atlas, [target[1] for target in body_targets]):
+            body_atlas = None
     body_forced_font = None
     if body_targets and body_atlas is None:
         source_stats = collect_body_font_source_stats(source_image, body_targets)
@@ -2025,11 +2482,20 @@ def beautify_normal_with_ocr(args, metrics, on_progress=None):
             body_forced_font["force_alpha_match_strength"] = BODY_NATIVE_FORCE_ALPHA_STRENGTH
 
     try:
-        header_item = find_header_view_value(items, image_size=image.size)
-        # The header row often contains icon-like OCR noise and sparse digits.
-        # Use calibrated font rendering there; row glyph synthesis is reserved
-        # for the body metric rows where nearby source glyphs are reliable.
-        header_patches = [("header_views", metrics["views_text"], header_item, None)]
+        header_raw = find_header_view_value(items, image_size=image.size)
+        full_rect = dict(header_raw["rect"])
+        ink_probe = get_ink_rect(source_image, full_rect, raw_text=str(header_raw["text"]))
+        refined_rect = refine_header_number_rect(source_image, full_rect)
+        header_item = dict(header_raw)
+        header_item["rect"] = refined_rect
+        header_forced_font = build_header_views_forced_font(
+            ink_rect=ink_probe,
+            original_text=normalize_metric_text(header_raw["text"]),
+            new_text=str(metrics["header_views_text"]),
+        )
+        header_patches = [
+            ("header_views", metrics["header_views_text"], header_item, None, header_forced_font),
+        ]
     except RuntimeError:
         print("[warn] header view count not found, skipping header patch")
         header_patches = []
@@ -2048,7 +2514,7 @@ def beautify_normal_with_ocr(args, metrics, on_progress=None):
         _prog(f"渲染数字 {i + 1}/{total}…")
         rect = item["rect"]
         original_text = normalize_metric_text(item["text"])
-        if not metric_text_changed(original_text, str(text)):
+        if label != "header_views" and not metric_text_changed(original_text, str(text)):
             if args.style_report:
                 print(json.dumps({str(label): {"mode": "unchanged", "text": original_text}}, ensure_ascii=False))
             continue
@@ -2076,7 +2542,7 @@ def inspect_normal(args):
 
     image = Image.open(args.normal).convert("RGB")
     items = detect_items_with_paddle(np.array(image))
-    metrics = extract_metrics_from_items(items)
+    metrics = extract_metrics_from_items(items, image_size=image.size)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
 

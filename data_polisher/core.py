@@ -35,6 +35,7 @@ def calculate_metrics(
     interaction_count = sum(parts)
     click_rate = views / exposure
     interaction_rate = interaction_count / views if views > 0 else 0
+    views_txt = str(round(views))
 
     return {
         "exposure": round(exposure),
@@ -43,7 +44,8 @@ def calculate_metrics(
         "click_rate": click_rate,
         "interaction_rate": interaction_rate,
         "exposure_text": str(round(exposure)),
-        "views_text": str(round(views)),
+        "views_text": views_txt,
+        "header_views_text": views_txt,
         "click_rate_text": format_percent(click_rate),
         "interaction_rate_text": format_percent(interaction_rate),
     }

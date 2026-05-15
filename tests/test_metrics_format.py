@@ -25,6 +25,8 @@ class MetricsFormatTests(unittest.TestCase):
 
         self.assertEqual(metrics["click_rate_text"], "30%")
         self.assertEqual(metrics["interaction_rate_text"], "0%")
+        self.assertEqual(metrics["views_text"], "300")
+        self.assertEqual(metrics["header_views_text"], metrics["views_text"])
 
     def test_metric_text_changed_skips_identical_values(self):
         self.assertFalse(metric_text_changed("122", "122"))

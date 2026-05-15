@@ -99,5 +99,31 @@ class GlyphSegmentationTest(unittest.TestCase):
         )
 
 
+class HeaderViewPickTests(unittest.TestCase):
+    """顶部统计行：从左第一个数字为小眼睛（排除左侧日期）。"""
+
+    def test_find_header_view_value_first_metric_left_of_row(self):
+        from data_polisher.cli import find_header_view_value, normalize_metric_text
+
+        items = [
+            {"text": "05-07", "rect": {"x": 37, "y": 232, "width": 55, "height": 14}},
+            {"text": "◎6", "rect": {"x": 137, "y": 234, "width": 37, "height": 15}},
+            {"text": "0", "rect": {"x": 283, "y": 233, "width": 11, "height": 13}},
+        ]
+        picked = find_header_view_value(items, image_size=(540, 1200))
+        self.assertEqual(normalize_metric_text(picked["text"]), "6")
+
+    def test_find_header_skips_date_before_eye_metric(self):
+        from data_polisher.cli import find_header_view_value, normalize_metric_text
+
+        items = [
+            {"text": "04-27", "rect": {"x": 40, "y": 233, "width": 50, "height": 14}},
+            {"text": "◎ 36", "rect": {"x": 138, "y": 233, "width": 50, "height": 17}},
+            {"text": "0", "rect": {"x": 293, "y": 234, "width": 12, "height": 15}},
+        ]
+        picked = find_header_view_value(items, image_size=(540, 1200))
+        self.assertEqual(normalize_metric_text(picked["text"]), "36")
+
+
 if __name__ == "__main__":
     unittest.main()
