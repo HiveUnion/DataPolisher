@@ -43,6 +43,16 @@ def _title_match_score(query: str, candidate: str) -> float:
         return 1.0 + min(len(q), len(t)) / max(len(t), 1) * 0.1
     if t in q:
         return 0.88 + min(len(t), len(q)) / max(len(q), 1) * 0.08
+    query_parts = [
+        part
+        for part in re.split(r"[\s,，;；/|]+", q)
+        if len(part) >= 2 and not re.fullmatch(r"\d{1,2}[-/.]\d{1,2}", part)
+    ]
+    if query_parts:
+        hits = [part for part in query_parts if part in t]
+        if hits:
+            longest = max(len(part) for part in hits)
+            return 0.82 + min(0.16, longest / max(len(t), 1) * 0.45)
     return float(difflib.SequenceMatcher(None, q, t).ratio())
 
 
@@ -222,6 +232,111 @@ def _roi_tuple(r: Dict[str, int]) -> Tuple[int, int, int, int]:
     return (r["x"], r["y"], r["x"] + r["width"], r["y"] + r["height"])
 
 
+def _bright_components(mask) -> list[Tuple[int, Tuple[int, int, int, int]]]:
+    import numpy as np
+
+    h, w = mask.shape
+    seen = np.zeros_like(mask, dtype=bool)
+    comps: list[Tuple[int, Tuple[int, int, int, int]]] = []
+    for y in range(h):
+        for x in range(w):
+            if not mask[y, x] or seen[y, x]:
+                continue
+            stack = [(x, y)]
+            seen[y, x] = True
+            pts: list[Tuple[int, int]] = []
+            while stack:
+                cx, cy = stack.pop()
+                pts.append((cx, cy))
+                for ny in range(cy - 1, cy + 2):
+                    for nx in range(cx - 1, cx + 2):
+                        if 0 <= nx < w and 0 <= ny < h and mask[ny, nx] and not seen[ny, nx]:
+                            seen[ny, nx] = True
+                            stack.append((nx, ny))
+            if len(pts) >= 2:
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                comps.append((len(pts), (min(xs), min(ys), max(xs) + 1, max(ys) + 1)))
+    return comps
+
+
+def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Optional[dict]:
+    """Fallback when OCR misses a tiny view count: find bright digit strokes after the eye icon."""
+
+    import numpy as np
+
+    compact = dict(roi)
+    compact["width"] = min(int(roi["width"]), 72)
+    crop = image.crop(_roi_tuple(compact)).convert("RGB")
+    arr = np.array(crop)
+    if arr.size == 0:
+        return None
+    lum = arr.mean(axis=2)
+    spread = arr.max(axis=2) - arr.min(axis=2)
+    bg = float(np.median(lum))
+    mask = (lum > max(185.0, bg + 28.0)) & (spread < 80)
+
+    comps = _bright_components(mask)
+    if not comps:
+        return None
+
+    h, w = mask.shape
+    left_limit = max(18, int(w * 0.45))
+    eye_like = [
+        (area, box)
+        for area, box in comps
+        if box[0] < left_limit and area >= 24 and (box[2] - box[0]) >= 6 and (box[3] - box[1]) >= 6
+    ]
+    eye_right = max((box[2] for _area, box in eye_like), default=max(10, int(w * 0.26)))
+    digit_min_x = eye_right + 3
+
+    digit_comps = []
+    for area, box in comps:
+        x0, y0, x1, y1 = box
+        bw, bh = x1 - x0, y1 - y0
+        if x0 < digit_min_x:
+            continue
+        if x0 > digit_min_x + 34:
+            continue
+        if y0 > int(h * 0.78):
+            continue
+        if bh < 6 or bw > 18 or area > 90:
+            continue
+        digit_comps.append((area, box))
+
+    if not digit_comps:
+        return None
+    digit_comps.sort(key=lambda item: item[1][0])
+
+    keep = [digit_comps[0][1]]
+    last = keep[-1]
+    for _area, box in digit_comps[1:]:
+        gap = box[0] - last[2]
+        if gap > 8:
+            break
+        if box[2] - keep[0][0] > 42:
+            break
+        keep.append(box)
+        last = box
+
+    x0 = max(0, min(box[0] for box in keep) - 1)
+    y0 = max(0, min(box[1] for box in keep) - 1)
+    x1 = min(w, max(box[2] for box in keep) + 1)
+    y1 = min(h, max(box[3] for box in keep) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    width = max(8, x1 - x0)
+    return {
+        "text": "1",
+        "rect": {
+            "x": compact["x"] + x0,
+            "y": compact["y"] + y0,
+            "width": width,
+            "height": max(8, y1 - y0),
+        },
+    }
+
+
 def find_card_eye_number_item(image: Image.Image, items: list, title_item: dict) -> dict:
     """定位封面左下角小眼睛旁浏览数字对应的 OCR 框（必要时退回整条几何 ROI）。"""
     w, h = image.size
@@ -257,6 +372,10 @@ def find_card_eye_number_item(image: Image.Image, items: list, title_item: dict)
             best = {"text": it["text"], "rect": rr}
     if best is not None:
         return best
+
+    visual = _visual_overlay_item_from_roi(image, roi)
+    if visual is not None:
+        return visual
 
     raise RuntimeError(
         "未在封面左下角条带内识别到浏览数字。"

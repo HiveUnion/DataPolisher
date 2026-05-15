@@ -169,7 +169,9 @@ def detect_bounds_with_paddle(image) -> Optional[Dict[str, int]]:
     if _apple_vision_available():
         from . import ocr_apple
 
-        return ocr_apple.detect_bounds(image)
+        bounds = ocr_apple.detect_bounds(image)
+        if bounds is not None:
+            return bounds
     engine = get_ocr_engine()
     result = engine.predict(image)
     return extract_ocr_text_bounds(result)
@@ -179,8 +181,9 @@ def detect_items_with_paddle(image):
     if _apple_vision_available():
         from . import ocr_apple
 
-        return ocr_apple.detect_items(image)
+        items = ocr_apple.detect_items(image)
+        if items:
+            return items
     engine = get_ocr_engine()
     result = engine.predict(image)
     return extract_ocr_items(result)
-

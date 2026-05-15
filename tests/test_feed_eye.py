@@ -1,5 +1,7 @@
 import unittest
-from PIL import Image
+from unittest.mock import patch
+
+from PIL import Image, ImageDraw
 
 from data_polisher import cli
 from data_polisher import feed_eye
@@ -14,6 +16,15 @@ class FeedEyeTitlePickTests(unittest.TestCase):
         best, score = feed_eye.pick_best_title_item(items, "神明")
         self.assertIn("神明", best["text"])
         self.assertGreater(score, 0.9)
+
+    def test_query_can_include_date_hint(self):
+        items = [
+            {"text": "谁懂啊！有线耳机用一个", "rect": {"x": 286, "y": 941, "width": 220, "height": 24}},
+            {"text": "昨天18:59", "rect": {"x": 319, "y": 1019, "width": 61, "height": 17}},
+        ]
+        best, score = feed_eye.pick_best_title_item(items, "耳机 12-23")
+        self.assertIn("耳机", best["text"])
+        self.assertGreater(score, 0.8)
 
     def test_raises_when_no_title_candidate(self):
         items = [{"text": "123", "rect": {"x": 0, "y": 0, "width": 1, "height": 1}}]
@@ -111,12 +122,40 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
         it = feed_eye.find_card_eye_number_item(img, items, title)
         self.assertEqual(it["text"], "99")
 
+    def test_visual_fallback_finds_tiny_one_when_ocr_misses_overlay(self):
+        title = {"text": "谁懂啊！有线耳机用一个", "rect": {"x": 285, "y": 941, "width": 228, "height": 24}}
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        img = Image.new("RGB", (540, 1200), color=(245, 245, 245))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle(
+            (thumb["x"], thumb["y"], thumb["x"] + thumb["width"], thumb["y"] + thumb["height"]),
+            fill=(170, 145, 110),
+        )
+        # Semi-transparent-looking pill, eye icon, and a very small one-digit count.
+        draw.rounded_rectangle(
+            (roi["x"] + 6, roi["y"] + 7, roi["x"] + 54, roi["y"] + 30),
+            radius=12,
+            fill=(120, 112, 98),
+        )
+        draw.ellipse((roi["x"] + 14, roi["y"] + 14, roi["x"] + 30, roi["y"] + 23), fill=(248, 248, 248))
+        draw.ellipse((roi["x"] + 20, roi["y"] + 16, roi["x"] + 24, roi["y"] + 20), fill=(120, 112, 98))
+        draw.line((roi["x"] + 39, roi["y"] + 10, roi["x"] + 39, roi["y"] + 24), fill=(255, 255, 255), width=2)
+
+        with patch("data_polisher.feed_eye.cli.detect_items_with_paddle", return_value=[]):
+            it = feed_eye.find_card_eye_number_item(img, [title], title)
+
+        self.assertEqual(it["text"], "1")
+        self.assertGreaterEqual(it["rect"]["x"], roi["x"] + 35)
+        self.assertLess(it["rect"]["x"], roi["x"] + 48)
+
     def test_raises_when_no_overlay_candidate(self):
         title = {"text": "只有标题足够长度中文", "rect": {"x": 20, "y": 400, "width": 180, "height": 22}}
         img = Image.new("RGB", (540, 700), color=(255, 255, 255))
         items = [title]
-        with self.assertRaises(RuntimeError):
-            feed_eye.find_card_eye_number_item(img, items, title)
+        with patch("data_polisher.feed_eye.cli.detect_items_with_paddle", return_value=[]):
+            with self.assertRaises(RuntimeError):
+                feed_eye.find_card_eye_number_item(img, items, title)
 
 
 class FeedEyeClampViewsTests(unittest.TestCase):
