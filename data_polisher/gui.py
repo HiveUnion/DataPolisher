@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 import threading
 import tkinter as tk
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from types import SimpleNamespace
@@ -19,6 +19,7 @@ from typing import Callable, List, Optional
 from PIL import Image, ImageTk
 
 from . import cli as backend
+from . import feed_eye
 
 
 PREVIEW_MAX_WIDTH = 340
@@ -110,28 +111,64 @@ class DataPolisherApp(tk.Tk):
     # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build_layout(self) -> None:
-        # ── Left panel: metrics form ──────────────────────────────────────────
+        # ── Left panel: tabbed mode switch + shared task actions ──────────────
         left = ttk.Frame(self, padding=12)
         left.pack(side=tk.LEFT, fill=tk.Y)
 
-        ttk.Label(left, text="指标数据", font=("", 11, "bold")).pack(anchor=tk.W, pady=(0, 8))
+        self.notebook = ttk.Notebook(left)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        tab_detail = ttk.Frame(self.notebook, padding=(0, 4, 0, 0))
+        tab_eye = ttk.Frame(self.notebook, padding=(0, 4, 0, 0))
+        self.notebook.add(tab_detail, text="详细数据")
+        self.notebook.add(tab_eye, text="小眼睛")
+
+        # ── Tab: 详细数据（原「数据中心」整块能力）────────────────────────────
+        ttk.Label(tab_detail, text="指标数据", font=("", 11, "bold")).pack(anchor=tk.W, pady=(0, 8))
 
         self.entries: dict[str, ttk.Entry] = {}
-        self._add_entry(left, "exposure", "新曝光数", "1000")
-        self._add_entry(left, "views",    "新观看数", "300")
-        ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
-        ttk.Label(left, text="互动数据（可选）", foreground="#666").pack(anchor=tk.W)
-        self._add_entry(left, "likes",    "点赞数", "0")
-        self._add_entry(left, "comments", "评论数", "0")
-        self._add_entry(left, "collects", "收藏数", "0")
-        self._add_entry(left, "shares",   "分享数", "0")
+        self._add_entry(tab_detail, "exposure", "新曝光数", "1000")
+        self._add_entry(tab_detail, "views",    "新观看数", "300")
+        ttk.Separator(tab_detail, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+        ttk.Label(tab_detail, text="互动数据（可选）", foreground="#666").pack(anchor=tk.W)
+        self._add_entry(tab_detail, "likes",    "点赞数", "0")
+        self._add_entry(tab_detail, "comments", "评论数", "0")
+        self._add_entry(tab_detail, "collects", "收藏数", "0")
+        self._add_entry(tab_detail, "shares",   "分享数", "0")
+
+        # ── Tab: 小眼睛（信息流卡片：按标题匹配，只改浏览数字）────────────────
+        ttk.Label(
+            tab_eye,
+            text=(
+                "适用：列表类截图。浏览量在每条笔记封面图左下角（小眼睛旁）；不会改标题下方的点赞等数字。\n"
+                "新浏览量不得超过原图识别到的数字位数（一位最大 9，两位最大 99，以此类推）；超出会自动裁剪。\n"
+                "位数会结合 OCR 原文中的连续数字判断，避免混在句子里的两位数被当成一位。\n"
+                "若 OCR 只认出一位数字（例如把「40」读成「4」），但数字框仍明显偏宽，会按框的宽高再推断位数。\n"
+                "仅替换数字周围极小范围内的底色以便盖住旧字，不拉长胶囊。"
+            ),
+            foreground="#444",
+            wraplength=260,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 8))
+        self.eye_entries: dict[str, ttk.Entry] = {}
+        row_t = ttk.Frame(tab_eye)
+        row_t.pack(fill=tk.X, pady=2)
+        ttk.Label(row_t, text="标题关键词", width=10).pack(side=tk.LEFT)
+        e_title = ttk.Entry(row_t, width=10)
+        e_title.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.eye_entries["title"] = e_title
+        row_v = ttk.Frame(tab_eye)
+        row_v.pack(fill=tk.X, pady=2)
+        ttk.Label(row_v, text="新小眼睛数", width=10).pack(side=tk.LEFT)
+        e_views = ttk.Entry(row_v, width=10)
+        e_views.insert(0, "100")
+        e_views.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.eye_entries["views"] = e_views
 
         ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
-
         ttk.Button(left, text="＋ 添加图片…", command=self.on_add_files).pack(fill=tk.X)
-        ttk.Button(left, text="▶ 全部开始",   command=self.on_start_all).pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(left, text="✕ 清空列表",   command=self.on_clear_tasks).pack(fill=tk.X, pady=(4, 0))
-
+        ttk.Button(left, text="▶ 全部开始", command=self.on_start_all).pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(left, text="✕ 清空列表", command=self.on_clear_tasks).pack(fill=tk.X, pady=(4, 0))
         ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=12)
         self.global_status = ttk.Label(
             left, text="", foreground="#888", wraplength=170, justify=tk.LEFT
@@ -256,16 +293,45 @@ class DataPolisherApp(tk.Tk):
             inspect      = False,
             glyph_atlas  = False,
             style_report = False,
+            eye_mode     = False,
+        )
+
+    def _validate_eye_inputs(self) -> None:
+        if not self.eye_entries["title"].get().strip():
+            raise ValueError("标题关键词不能为空")
+        if not self.eye_entries["views"].get().strip():
+            raise ValueError("新小眼睛数不能为空")
+
+    def _make_eye_args(self, path: Path) -> SimpleNamespace:
+        self._validate_eye_inputs()
+        title = self.eye_entries["title"].get().strip()
+        views = self.eye_entries["views"].get().strip()
+        return SimpleNamespace(
+            normal=str(path),
+            output=None,
+            eye_title=title,
+            eye_views=views,
+            ocr=True,
+            glyph_atlas=False,
+            eye_mode=True,
         )
 
     # ── Task list management ──────────────────────────────────────────────────
 
     def on_add_files(self) -> None:
-        try:
-            metrics = self._parse_metrics()
-        except ValueError as exc:
-            messagebox.showerror("输入有误", str(exc))
-            return
+        tab = int(self.notebook.index(self.notebook.select()))
+        if tab == 0:
+            try:
+                metrics = self._parse_metrics()
+            except ValueError as exc:
+                messagebox.showerror("输入有误", str(exc))
+                return
+        else:
+            try:
+                self._validate_eye_inputs()
+            except ValueError as exc:
+                messagebox.showerror("输入有误", str(exc))
+                return
 
         paths = filedialog.askopenfilenames(
             title="选择图片（可多选）",
@@ -276,7 +342,10 @@ class DataPolisherApp(tk.Tk):
 
         for p in paths:
             path = Path(p)
-            args = self._make_args(path, metrics)
+            if tab == 0:
+                args = self._make_args(path, metrics)
+            else:
+                args = self._make_eye_args(path)
             task = TaskItem(path=path, args=args)
             self._tasks.append(task)
             self.tree.insert(
@@ -370,25 +439,28 @@ class DataPolisherApp(tk.Tk):
                 break
             self.after(0, self._set_task_running, task)
             try:
-                metrics = backend.calculate_metrics(
-                    exposure=task.args.exposure,
-                    views=task.args.views,
-                    likes=task.args.likes,
-                    comments=task.args.comments,
-                    collects=task.args.collects,
-                    shares=task.args.shares,
-                )
-
                 def _progress(msg: str, _task=task) -> None:
                     self.after(0, self._set_task_progress, _task, msg)
 
-                # Pre-load the original for preview
                 original = Image.open(task.args.normal).convert("RGB")
                 task.original_image = original
 
-                result = backend.beautify_normal_with_ocr(
-                    task.args, metrics, on_progress=_progress
-                )
+                if getattr(task.args, "eye_mode", False):
+                    result = feed_eye.beautify_feed_card_eye(
+                        task.args, on_progress=_progress
+                    )
+                else:
+                    metrics = backend.calculate_metrics(
+                        exposure=task.args.exposure,
+                        views=task.args.views,
+                        likes=task.args.likes,
+                        comments=task.args.comments,
+                        collects=task.args.collects,
+                        shares=task.args.shares,
+                    )
+                    result = backend.beautify_normal_with_ocr(
+                        task.args, metrics, on_progress=_progress
+                    )
                 self.after(0, self._set_task_done, task, result)
             except Exception as exc:  # noqa: BLE001
                 self.after(0, self._set_task_failed, task, exc)

@@ -60,7 +60,7 @@ class FontCalibrationTests(unittest.TestCase):
         self.assertGreaterEqual(one_bbox[2] - one_bbox[0], 20)
 
     def test_body_native_font_uses_small_visual_adjustment(self):
-        self.assertEqual(cli.BODY_NATIVE_FONT_SIZE_ADJUST, 1)
+        self.assertEqual(cli.BODY_NATIVE_FONT_SIZE_ADJUST, 2)
 
     def test_body_native_font_uses_slight_bold_variant(self):
         self.assertEqual(cli.BODY_NATIVE_FORCE_EDGE_VARIANT, "w1x:quantized")
@@ -118,6 +118,16 @@ class FontCalibrationTests(unittest.TestCase):
 
         self.assertLess(cli.style_distance(target, balanced), cli.style_distance(target, lighter))
         self.assertLess(cli.style_distance(target, balanced), cli.style_distance(target, darker))
+
+    def test_overlay_views_left_nudge_negative_when_replacement_wider(self):
+        font_path = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
+        font = cli.load_font_by_path(font_path, 18)
+        if font is None:
+            self.skipTest("Arial Bold not available")
+        self.assertEqual(cli._overlay_views_left_nudge_px("40", "40", font=font), 0)
+        n = cli._overlay_views_left_nudge_px("40", "999", font=font)
+        self.assertLess(n, 0)
+        self.assertGreaterEqual(n, -10)
 
 
 if __name__ == "__main__":

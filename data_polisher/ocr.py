@@ -10,11 +10,10 @@ def _apple_vision_available() -> bool:
     if sys.platform != "darwin":
         return False
     try:
-        from . import ocr_apple  # noqa: F401
-
-        return ocr_apple.is_available()
-    except Exception:
+        from . import ocr_apple
+    except ImportError:
         return False
+    return ocr_apple.is_available()
 
 
 def _flatten_ocr_items(result: Any) -> Iterable[Any]:
@@ -144,9 +143,18 @@ def get_ocr_engine():
     try:
         from paddleocr import PaddleOCR  # type: ignore
     except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        frozen_mac = getattr(sys, "frozen", False) and sys.platform == "darwin"
+        hint = ""
+        if frozen_mac:
+            hint = (
+                " Reinstall from a freshly built .app (paddle/pandas/protobuf must be bundled). "
+                "Or run from source: pip install -r requirements.txt"
+            )
+        else:
+            hint = " Install OCR dependencies with `pip install -r requirements.txt`."
         raise RuntimeError(
-            "PaddleOCR is not installed. Install OCR dependencies with "
-            "`pip install -r requirements.txt` or use the bundled installer."
+            f"PaddleOCR could not be loaded ({detail}).{hint}"
         ) from exc
 
     return PaddleOCR(

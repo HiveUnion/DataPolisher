@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .core import (
     calculate_metrics,
@@ -114,6 +115,144 @@ def inpaint_or_fill(image, rect: Dict[str, int]):
     return patched
 
 
+def inpaint_overlay_views_compact_fill(image, rect: Dict[str, int]):
+    """Erase overlay digits in a tight rect using local capsule-toned median (not edge slab)."""
+
+    import numpy as np
+    from PIL import ImageDraw
+
+    patched = image.copy()
+    crop = patched.crop(rect_to_box(rect))
+    arr = np.asarray(crop.convert("RGB"), dtype=np.float32)
+    lum = 0.299 * arr[..., 0] + 0.587 * arr[..., 1] + 0.114 * arr[..., 2]
+    thr = float(np.percentile(lum, 58))
+    flat_lum = lum.reshape(-1)
+    flat_rgb = arr.reshape(-1, 3)
+    mask = flat_lum < thr
+    pixels = flat_rgb[mask]
+    if pixels.shape[0] < 10:
+        color = average_edge_color(image, rect)
+    else:
+        med = np.median(pixels, axis=0)
+        color = (int(round(med[0])), int(round(med[1])), int(round(med[2])))
+
+    draw = ImageDraw.Draw(patched)
+    draw.rectangle(rect_to_box(rect), fill=color)
+    return patched
+
+
+def inpaint_overlay_views_translucent_fill(
+    image,
+    source_image,
+    padded: Dict[str, int],
+    ink_rect: Dict[str, int],
+    thumb: Dict[str, int],
+    strip_roi: Dict[str, int],
+):
+    """Rebuild capsule pixels as ``(1-α)·T + α·C`` (thumbnail *T*, tint *C*) like real translucency.
+
+    Solid median fills look like an opaque patch; this keeps underlying note texture visible.
+    """
+
+    import numpy as np
+
+    arr_src = np.asarray(source_image.convert("RGB"), dtype=np.float32)
+    patched_arr = np.asarray(image.convert("RGB"), dtype=np.float32).copy()
+    ih, iw = arr_src.shape[:2]
+
+    rx, ry = int(strip_roi["x"]), int(strip_roi["y"])
+    rw, rh = int(strip_roi["width"]), int(strip_roi["height"])
+    sx0, sy0 = int(thumb["x"]), int(thumb["y"])
+    tw, th = int(thumb["width"]), int(thumb["height"])
+
+    if rx + rw > iw or ry + rh > ih or sx0 + tw > iw or sy0 + th > ih:
+        return inpaint_overlay_views_compact_fill(image, padded)
+
+    strip_obs = arr_src[ry : ry + rh, rx : rx + rw]
+
+    ty_rel = ry - sy0 - max(8, rh // 2)
+    ty_rel = int(np.clip(ty_rel, 2, th - 3))
+
+    baseline = np.zeros((rh, rw, 3), dtype=np.float32)
+    for xi in range(rw):
+        tx = rx + xi - sx0
+        if tx < 1 or tx >= tw - 1:
+            baseline[:, xi, :] = strip_obs[:, xi, :]
+            continue
+        patch = arr_src[
+            sy0 + ty_rel - 2 : sy0 + ty_rel + 3,
+            sx0 + tx - 1 : sx0 + tx + 2,
+            :,
+        ]
+        med_col = np.median(patch.reshape(-1, 3), axis=0)
+        baseline[:, xi, :] = med_col
+
+    lum_med = np.median(
+        0.299 * strip_obs[..., 0]
+        + 0.587 * strip_obs[..., 1]
+        + 0.114 * strip_obs[..., 2],
+        axis=0,
+    )
+
+    ix_left = int(round(float(ink_rect["x"]) - rx))
+    ix_right = int(round(float(ink_rect["x"] + ink_rect["width"]) - rx))
+
+    interior_cols = [
+        i
+        for i in range(0, rw)
+        if float(lum_med[i]) < 229.0 and (i < ix_left - 3 or i > ix_right + 3)
+    ]
+
+    if len(interior_cols) < 3:
+        interior_cols = [
+            i
+            for i in range(0, rw)
+            if float(lum_med[i]) < 235.0 and (i < ix_left - 2 or i > ix_right + 2)
+        ]
+
+    if len(interior_cols) < 3:
+        return inpaint_overlay_views_compact_fill(image, padded)
+
+    b_samples = baseline[:, interior_cols, :].reshape(-1, 3)
+    o_samples = strip_obs[:, interior_cols, :].reshape(-1, 3)
+
+    best: Optional[Tuple[float, float, np.ndarray]] = None
+    for alpha in np.linspace(0.22, 0.55, 18):
+        denom = float(alpha) if float(alpha) > 1e-3 else 1e-3
+        d_samp = (o_samples - (1.0 - alpha) * b_samples) / denom
+        d_samp = np.clip(d_samp, 0.0, 255.0)
+        c_rgb = np.median(d_samp, axis=0)
+        pred = (1.0 - alpha) * b_samples + alpha * c_rgb.reshape(1, 3)
+        score = float(np.mean(np.abs(pred - o_samples)))
+        if best is None or score < best[0]:
+            best = (score, float(alpha), c_rgb.copy())
+
+    if best is None:
+        return inpaint_overlay_views_compact_fill(image, padded)
+
+    alpha_f = best[1]
+    c_rgb = np.clip(best[2], 0.0, 255.0)
+
+    x0, y0, x1, y1 = rect_to_box(padded)
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(iw, x1), min(ih, y1)
+
+    for gy in range(y0, y1):
+        ys = gy - ry
+        if ys < 0 or ys >= rh:
+            continue
+        for gx in range(x0, x1):
+            xs = gx - rx
+            if xs < 0 or xs >= rw:
+                continue
+            bpx = baseline[ys, xs, :]
+            patched_arr[gy, gx] = (1.0 - alpha_f) * bpx + alpha_f * c_rgb
+
+    from PIL import Image
+
+    return Image.fromarray(np.clip(np.round(patched_arr), 0, 255).astype(np.uint8))
+
+
 def load_font(size: int, weight: str):
     from PIL import ImageFont
 
@@ -171,6 +310,28 @@ def rendered_ink_bbox(text: str, font):
         bbox[2] - origin[0],
         bbox[3] - origin[1],
     )
+
+
+def _overlay_views_left_nudge_px(original_text: str, new_text: str, *, font) -> int:
+    """Negative horizontal delta when ``new_text`` renders wider than ``original_text``.
+
+    Calibration fits offsets using the original string; a wider replacement otherwise sits
+    too far right relative to the eye icon / capsule. Shift slightly left in proportion
+    to extra pixel width (capped).
+    """
+
+    if font is None or not original_text or not new_text:
+        return 0
+    bo = rendered_ink_bbox(str(original_text), font)
+    bn = rendered_ink_bbox(str(new_text), font)
+    wo = max(0, bo[2] - bo[0])
+    wn = max(0, bn[2] - bn[0])
+    extra = wn - wo
+    if extra <= 0:
+        return 0
+    h_ref = max(1, bo[3] - bo[1], bn[3] - bn[1])
+    cap = max(4, min(10, int(round(h_ref * 0.32))))
+    return -min(max(1, round(extra * 0.34)), cap)
 
 
 def rendered_ink_stats(text: str, font):
@@ -519,6 +680,35 @@ def extract_ink_color(image, rect: Dict[str, int]):
     ink_lum = 0.299 * ink[:, 0] + 0.587 * ink[:, 1] + 0.114 * ink[:, 2]
     order = np.argsort(ink_lum)
     core = ink[order[: max(1, int(len(order) * 0.65))]]
+    mean = core.mean(axis=0)
+    return (round(float(mean[0])), round(float(mean[1])), round(float(mean[2])))
+
+
+def extract_light_overlay_text_color(image, rect: Dict[str, int]):
+    """Sample RGB for bright overlay strokes (e.g. white view count on cover pill).
+
+    ``extract_ink_color`` only considers dark pixels (body text); thumbnail overlays
+    are often near-white. Returns ``None`` when no confident bright-neutral pixels.
+    """
+
+    import numpy as np
+
+    arr = np.array(image.crop(rect_to_box(rect)).convert("RGB"), dtype=np.float32)
+    if arr.size == 0:
+        return None
+    pixels = arr.reshape(-1, 3)
+    lum = 0.299 * pixels[:, 0] + 0.587 * pixels[:, 1] + 0.114 * pixels[:, 2]
+    chroma = pixels.max(axis=1) - pixels.min(axis=1)
+    mask = (lum >= 232.0) & (chroma < 52.0)
+    if int(mask.sum()) < 4:
+        mask = (lum >= 218.0) & (chroma < 62.0)
+    if int(mask.sum()) < 4:
+        return None
+    sel = pixels[mask]
+    sel_lum = lum[mask]
+    order = np.argsort(-sel_lum)
+    k = max(4, int(len(order) * 0.5))
+    core = sel[order[:k]]
     mean = core.mean(axis=0)
     return (round(float(mean[0])), round(float(mean[1])), round(float(mean[2])))
 
@@ -1008,6 +1198,142 @@ def _trim_ink_rect_to_metric_suffix(pixels, bounds: Dict[str, int], raw_text: st
     }
 
 
+def _percentile_sorted(xs: List[float], p: float) -> float:
+    if not xs:
+        return 0.0
+    ys = sorted(xs)
+    idx = int(round((len(ys) - 1) * p))
+    idx = max(0, min(len(ys) - 1, idx))
+    return ys[idx]
+
+
+def _luminance_rgb(pixel: Tuple[int, ...]) -> float:
+    return 0.299 * pixel[0] + 0.587 * pixel[1] + 0.114 * pixel[2]
+
+
+def localize_feed_overlay_views_ink(
+    image,
+    rect: Dict[str, int],
+    raw_text: str = "",
+) -> Optional[Dict[str, int]]:
+    """Locate light-on-gradient overlay digits (feed thumbnail view count).
+
+    ``detect_dark_text_bounds`` / ``pixel_looks_like_text`` target dark body text;
+    cover overlays are often bright strokes on a bright strip, so we score columns
+    by high-percentile luminance relative to the crop median background.
+    """
+
+    pixels = crop_pixels(image, rect)
+    if not pixels:
+        return None
+    height = len(pixels)
+    width = len(pixels[0]) if height else 0
+    if height < 3 or width < 4:
+        return None
+
+    flat_lums = [_luminance_rgb(pixels[y][x]) for y in range(height) for x in range(width)]
+    bg = float(statistics.median(flat_lums))
+
+    scores: List[float] = []
+    for x in range(width):
+        col = [_luminance_rgb(pixels[y][x]) for y in range(height)]
+        scores.append(_percentile_sorted(col, 0.9) - bg)
+
+    def runs_for_delta(delta: float) -> List[Tuple[int, int]]:
+        cols = [x for x in range(width) if scores[x] >= delta]
+        if not cols:
+            return []
+        seg: List[Tuple[int, int]] = []
+        s0, prev = cols[0], cols[0]
+        for c in cols[1:]:
+            if c - prev > 2:
+                seg.append((s0, prev))
+                s0 = c
+            prev = c
+        seg.append((s0, prev))
+        return seg
+
+    delta_order = (18.0, 17.0, 16.0, 15.0, 14.0, 12.0)
+    runs: List[Tuple[int, int]] = []
+    for d in delta_order:
+        runs = runs_for_delta(d)
+        if runs:
+            break
+    if not runs:
+        return None
+
+    mega_cut = max(14, int(width * 0.72))
+    runs = [(a, b) for a, b in runs if (b - a + 1) < mega_cut]
+
+    merged: List[List[int]] = []
+    for a, b in sorted(runs):
+        if not merged:
+            merged.append([a, b])
+            continue
+        la, lb = merged[-1]
+        if a - lb <= 5:
+            merged[-1][1] = max(lb, b)
+        else:
+            merged.append([a, b])
+    runs_merged: List[Tuple[int, int]] = [(m[0], m[1]) for m in merged]
+
+    norm = normalize_metric_text(raw_text or "")
+    est_chars = max(1, len(norm))
+    min_w = max(6, est_chars * 5)
+    max_w_metric = est_chars * 26 + 16
+    max_w_crop = min(width - 1, max(int(width * 0.50), est_chars * 22 + 8))
+    max_w = min(max_w_metric, max_w_crop)
+    max_run_w = min(width - 1, max(int(width * 0.42), est_chars * 22 + 12))
+    left_skip = max(8, int(width * 0.13))
+
+    runs_merged = [(a, b) for a, b in runs_merged if (b - a + 1) <= max_run_w]
+
+    def mean_score(a: int, b: int) -> float:
+        return sum(scores[x] for x in range(a, b + 1)) / (b - a + 1)
+
+    candidates: List[Tuple[int, int]] = [
+        (a, b) for a, b in runs_merged if min_w <= (b - a + 1) <= max_w
+    ]
+    if not candidates:
+        candidates = [(a, b) for a, b in runs_merged if (b - a + 1) >= min_w]
+
+    if not candidates:
+        return None
+
+    band_lo = max(min_w - 4, est_chars * 6)
+    band_hi = min(max_w + 8, max_run_w)
+
+    def rank_key(ab: Tuple[int, int]) -> Tuple:
+        a, b = ab
+        ww = b - a + 1
+        in_band = band_lo <= ww <= band_hi
+        ms = mean_score(a, b)
+        past_icon = 1 if a >= left_skip else 0
+        # Prefer region right of eye icon, plausible digit width, then contrast score.
+        return (past_icon, in_band, ms, a)
+
+    best_a, best_b = max(candidates, key=rank_key)
+
+    bright_thr = min(252.0, bg + 28.0)
+    min_y, max_y = height, -1
+    for y in range(height):
+        xs = pixels[y][best_a : best_b + 1]
+        bright = sum(1 for p in xs if _luminance_rgb(p) >= bright_thr)
+        if bright >= max(2, len(xs) // 8):
+            min_y = min(min_y, y)
+            max_y = max(max_y, y)
+
+    if max_y < min_y:
+        min_y, max_y = 0, height - 1
+
+    return {
+        "x": rect["x"] + best_a,
+        "y": rect["y"] + min_y,
+        "width": best_b - best_a + 1,
+        "height": max_y - min_y + 1,
+    }
+
+
 def get_ink_rect(image, rect: Dict[str, int], raw_text: str = "") -> Dict[str, int]:
     pixels = crop_pixels(image, rect)
     bounds = detect_dark_text_bounds(pixels)
@@ -1469,29 +1795,81 @@ def patch_ocr_rect_with_glyphs(
     row_atlas=None,
     raw_text: str = "",
     forced_font=None,
+    overlay_views_ink: bool = False,
+    overlay_thumb: Optional[Dict[str, int]] = None,
+    overlay_strip: Optional[Dict[str, int]] = None,
 ):
-    ink_rect = get_ink_rect(source_image, rect, raw_text=raw_text)
+    ink_rect = None
+    if overlay_views_ink:
+        ink_rect = localize_feed_overlay_views_ink(source_image, rect, raw_text=raw_text)
+    if ink_rect is None:
+        ink_rect = get_ink_rect(source_image, rect, raw_text=raw_text)
+
+    # Localized bright strokes can yield a box shorter than the OCR strip;
+    # calibration keys off ``height`` so text renders too small vs native UI.
+    if overlay_views_ink:
+        oh = max(8, int(rect["height"]))
+        ih = max(8, int(ink_rect["height"]))
+        span = oh - ih
+        if span >= 2:
+            target_h = min(oh, ih + min(span, 14))
+            mid_y = float(ink_rect["y"]) + ih / 2.0
+            ink_rect = dict(ink_rect)
+            ink_rect["height"] = target_h
+            ink_rect["y"] = int(round(mid_y - target_h / 2.0))
+            ink_rect["y"] = max(0, ink_rect["y"])
+
     image_size = {"width": image.width, "height": image.height}
 
-    # Inpaint only the tight ink bounding box (actual text pixels) so that
-    # decorative icons that share the OCR bounding box (e.g. the eye / play
-    # icon next to a view count) are left untouched.
-    padded = expand_rect(ink_rect, max(2, ink_rect["height"] // 5), image_size)
-    image = inpaint_or_fill(image, padded)
+    # Erase old glyphs: overlay uses minimal padding + capsule-toned fill (not wide edge slab).
+    if overlay_views_ink:
+        padded = expand_rect(ink_rect, 1, image_size)
+        if overlay_thumb is not None and overlay_strip is not None:
+            image = inpaint_overlay_views_translucent_fill(
+                image,
+                source_image,
+                padded,
+                ink_rect,
+                overlay_thumb,
+                overlay_strip,
+            )
+        else:
+            image = inpaint_overlay_views_compact_fill(image, padded)
+    else:
+        padded = expand_rect(ink_rect, max(2, ink_rect["height"] // 5), image_size)
+        image = inpaint_or_fill(image, padded)
 
     if row_atlas is not None:
-        composed = compose_text_from_row_atlas(image, row_atlas, ink_rect, text)
+        glyph_ink = ink_rect
+        if overlay_views_ink:
+            probe_font = load_font(max(8, min(72, ink_rect["height"])), "bold")
+            nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font)
+            if nx:
+                glyph_ink = dict(ink_rect)
+                glyph_ink["x"] = ink_rect["x"] + nx
+        composed = compose_text_from_row_atlas(image, row_atlas, glyph_ink, text)
         if composed is not None:
             return composed, {
                 "mode": "row_atlas",
                 "reference_height": row_atlas["reference_height"],
                 "glyph_spacing": row_atlas["glyph_spacing"],
-                "ink_rect": ink_rect,
+                "ink_rect": glyph_ink,
             }
 
-    if render_text_from_glyphs(image, ink_rect, text, atlas):
+    glyph_rect = ink_rect
+    if overlay_views_ink:
+        probe_font = load_font(max(8, min(72, ink_rect["height"])), "bold")
+        nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font)
+        if nx:
+            glyph_rect = dict(ink_rect)
+            glyph_rect["x"] = ink_rect["x"] + nx
+    if render_text_from_glyphs(image, glyph_rect, text, atlas):
         return image, {"mode": "glyph"}
     style = extract_ink_style(source_image, ink_rect)
+    if overlay_views_ink:
+        lite = extract_light_overlay_text_color(source_image, ink_rect)
+        if lite:
+            style["color"] = lite
     calibration = calibrate_text_render(source_image, image, ink_rect, original_text, style)
     if forced_font:
         calibration["font_size"] = forced_font["font_size"]
@@ -1503,6 +1881,12 @@ def patch_ocr_rect_with_glyphs(
             calibration["force_alpha_match_strength"] = forced_font["force_alpha_match_strength"]
         if "font_match" in forced_font:
             calibration["font_match"] = forced_font["font_match"]
+    if overlay_views_ink:
+        cal_font = load_font_by_path(calibration.get("font_path", ""), calibration["font_size"])
+        if cal_font is None:
+            cal_font = load_font(calibration["font_size"], "bold")
+        nx = _overlay_views_left_nudge_px(original_text, text, font=cal_font)
+        calibration["dx"] = int(calibration.get("dx", 0)) + nx
     image = draw_text_with_calibration(image, ink_rect, text, style, calibration)
     return image, {
         "mode": "font",

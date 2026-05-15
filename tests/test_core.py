@@ -16,8 +16,8 @@ class MetricsTest(unittest.TestCase):
             shares=2,
         )
 
-        self.assertEqual(metrics["click_rate_text"], "50.0%")
-        self.assertEqual(metrics["interaction_rate_text"], "20.0%")
+        self.assertEqual(metrics["click_rate_text"], "50%")
+        self.assertEqual(metrics["interaction_rate_text"], "20%")
 
     def test_rejects_non_positive_exposure(self):
         with self.assertRaises(ValueError):

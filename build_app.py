@@ -6,15 +6,15 @@ Run `python build_app.py` on macOS or Windows after installing
 * macOS  -> `dist/DataPolisher.app`
 * Windows -> `dist/DataPolisher/DataPolisher.exe`
 
-## macOS size optimisation (recommended)
+## macOS OCR
 
-Install the Apple Vision backend before building:
+Install PyObjC Vision **before building** if you want the smaller native OCR path
+at runtime (optional):
 
     pip install pyobjc-framework-Vision pyobjc-framework-Quartz
 
-When those packages are present this script automatically skips bundling
-PaddlePaddle / PaddleOCR and uses the OS-native Vision.framework instead,
-reducing the app bundle by ~300–600 MB.
+The app bundle **always** includes PaddlePaddle/PaddleOCR so OCR still works when
+Vision is unavailable inside the frozen executable.
 
 ## Windows / fallback
 
@@ -51,7 +51,9 @@ _EXCLUDE_MODULES = [
     "notebook",
     "nbformat",
     "nbconvert",
-    "pandas",
+    # NOTE: Do NOT exclude pandas / google.protobuf — paddleocr>=3 + paddlex
+    # import them at startup; excluding breaks ``import paddleocr`` in bundles.
+    # Do NOT exclude pkg_resources._vendor — breaks setuptools/appdirs in frozen apps.
     "sklearn",
     "skimage",
     "torch",
@@ -67,12 +69,10 @@ _EXCLUDE_MODULES = [
     "docutils",
     "sphinx",
     "pytest",
-    "pkg_resources._vendor",
     "lxml",
     "sqlalchemy",
     "aiohttp",
     "grpc",
-    "google.protobuf",
 ]
 
 
@@ -89,6 +89,53 @@ def _apple_vision_available() -> bool:
         return False
 
 
+def _pyinstaller_copy_metadata_flags() -> list[str]:
+    """Flags so PaddleX extras checks work inside a PyInstaller bundle.
+
+    PaddleOCR 3.x builds PaddleX pipelines using ``importlib.metadata`` (versions,
+    extras). Frozen apps omit ``*.dist-info`` unless we copy it — runtime then
+    raises ``RuntimeError: A dependency error occurred during pipeline creation``
+    even though the code is bundled. Official workaround:
+    https://www.paddleocr.ai/main/version3.x/deployment/packaging.html
+    """
+    try:
+        import importlib.metadata
+
+        from packaging.requirements import Requirement
+        from packaging.utils import canonicalize_name
+
+        from paddlex.utils import deps as pdx_deps
+    except Exception:
+        return []
+
+    needed: set[str] = set()
+    for key in pdx_deps.BASE_DEP_SPECS:
+        needed.add(canonicalize_name(key))
+    # OCR pipelines validate the ``ocr`` / ``ocr-core`` extras graph.
+    for extra in ("ocr", "ocr-core"):
+        block = pdx_deps.EXTRAS.get(extra) or {}
+        for dep_specs in block.values():
+            for dep_spec in dep_specs:
+                needed.add(canonicalize_name(Requirement(dep_spec).name))
+    for explicit in ("paddlex", "paddleocr", "paddlepaddle"):
+        needed.add(canonicalize_name(explicit))
+
+    flags: list[str] = []
+    seen: set[str] = set()
+    for dist in importlib.metadata.distributions():
+        raw_name = dist.metadata.get("Name")
+        if not raw_name:
+            continue
+        if canonicalize_name(raw_name) not in needed:
+            continue
+        if raw_name in seen:
+            continue
+        seen.add(raw_name)
+        flags += ["--copy-metadata", raw_name]
+
+    return flags
+
+
 def main() -> int:
     try:
         import PyInstaller  # noqa: F401
@@ -103,8 +150,6 @@ def main() -> int:
             else:
                 path.unlink()
 
-    use_apple_vision = _apple_vision_available()
-
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
@@ -113,27 +158,34 @@ def main() -> int:
         "--hidden-import=PIL._tkinter_finder",
         "--hidden-import=appdirs",
         "--collect-submodules=data_polisher",
+        # Always ship Paddle — Vision may fail inside a frozen .app on some machines,
+        # and slim Vision-only bundles surface misleading “PaddleOCR missing” errors.
+        "--collect-all=paddleocr",
+        "--collect-all=paddle",
+        "--collect-data=paddlex",
+        "--collect-submodules=paddle",
     ]
 
-    if use_apple_vision:
-        print("Apple Vision OCR detected -- skipping PaddlePaddle/PaddleOCR bundle.")
-        # PyObjC frameworks are loaded dynamically; tell PyInstaller about them.
+    meta_flags = _pyinstaller_copy_metadata_flags()
+    if meta_flags:
+        cmd += meta_flags
+        names = meta_flags[1::2]
+        print("PyInstaller --copy-metadata for PaddleX OCR checks:", ", ".join(names))
+
+    if platform.system() == "Darwin" and _apple_vision_available():
+        print("Apple Vision PyObjC detected — also bundling Paddle for OCR fallback.")
         cmd += [
             "--hidden-import=objc",
             "--hidden-import=Vision",
             "--hidden-import=Quartz",
             "--hidden-import=Foundation",
             "--collect-submodules=objc",
+            "--collect-submodules=Vision",
+            "--collect-submodules=Quartz",
+            "--collect-submodules=Foundation",
         ]
-    else:
-        print("Apple Vision not available -- bundling PaddleOCR (large).")
-        print("  To shrink the bundle: pip install pyobjc-framework-Vision pyobjc-framework-Quartz")
-        cmd += [
-            "--collect-all=paddleocr",
-            "--collect-all=paddle",
-            "--collect-data=paddlex",
-            "--collect-submodules=paddle",
-        ]
+    elif platform.system() == "Darwin":
+        print("Apple Vision PyObjC not in build env — bundling PaddleOCR only.")
 
     # Exclude heavy modules that are never needed.
     for mod in _EXCLUDE_MODULES:

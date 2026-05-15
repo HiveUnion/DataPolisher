@@ -22,7 +22,7 @@ def is_available() -> bool:
         import Vision  # noqa: F401
         import Quartz  # noqa: F401
         return True
-    except ImportError:
+    except (ImportError, OSError):
         return False
 
 
