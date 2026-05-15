@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import difflib
+import random
 import re
 import unicodedata
 from types import SimpleNamespace
@@ -338,6 +339,45 @@ def clamp_feed_overlay_views_to_digit_slots(
     return result, None
 
 
+def _feed_overlay_slot_cap(
+    original_norm: str,
+    *,
+    raw_ocr_hint: str = "",
+    ocr_rect: Optional[Dict[str, int]] = None,
+) -> Tuple[int, int]:
+    slots = _overlay_digit_slot_count(original_norm, raw_ocr_hint, ocr_rect=ocr_rect)
+    return slots, 10**slots - 1
+
+
+def choose_feed_overlay_views_for_slots(
+    original_norm: str,
+    requested_range: Tuple[int, int],
+    *,
+    raw_ocr_hint: str = "",
+    ocr_rect: Optional[Dict[str, int]] = None,
+    rng=random,
+) -> Tuple[str, Optional[str]]:
+    """Pick a random view count that still fits the original overlay digit slots."""
+
+    lo, hi = requested_range
+    if lo > hi:
+        lo, hi = hi, lo
+    slots, max_val = _feed_overlay_slot_cap(
+        original_norm,
+        raw_ocr_hint=raw_ocr_hint,
+        ocr_rect=ocr_rect,
+    )
+    bounded_hi = min(hi, max_val)
+    bounded_lo = min(lo, bounded_hi)
+    result = str(rng.randint(bounded_lo, bounded_hi))
+    if hi > max_val:
+        return (
+            result,
+            f"原浏览量为 {slots} 位数字（最大 {max_val}），随机范围已收窄为 {bounded_lo}-{bounded_hi}",
+        )
+    return result, None
+
+
 def beautify_feed_card_eye(
     args: SimpleNamespace,
     *,
@@ -346,7 +386,8 @@ def beautify_feed_card_eye(
     """ args 需含: normal, eye_title (str), eye_views (str), 以及 ocr/glyph_atlas 等。 """
     title_query = str(getattr(args, "eye_title", "") or "").strip()
     new_views = str(getattr(args, "eye_views", "") or "").strip()
-    if not new_views:
+    has_views_range = hasattr(args, "eye_views_range")
+    if not new_views and not has_views_range:
         raise ValueError("新浏览量不能为空")
 
     def _prog(msg: str) -> None:
@@ -372,21 +413,34 @@ def beautify_feed_card_eye(
     rect = dict(view_item["rect"])
     original_text = cli.normalize_metric_text(view_item["text"])
 
-    clamped_views, clamp_hint = clamp_feed_overlay_views_to_digit_slots(
-        original_text,
-        new_views,
-        raw_ocr_hint=str(view_item["text"]),
-        ocr_rect=rect,
-    )
+    thumb = _infer_thumbnail_rect(title_item, image.width, image.height)
+    strip_roi = _overlay_strip_roi(thumb)
+    slot_rect = cli.localize_feed_overlay_views_ink(
+        source_image,
+        rect,
+        raw_text=str(view_item["text"]),
+    ) or rect
+
+    if has_views_range:
+        clamped_views, clamp_hint = choose_feed_overlay_views_for_slots(
+            original_text,
+            tuple(getattr(args, "eye_views_range")),
+            raw_ocr_hint=str(view_item["text"]),
+            ocr_rect=slot_rect,
+        )
+    else:
+        clamped_views, clamp_hint = clamp_feed_overlay_views_to_digit_slots(
+            original_text,
+            new_views,
+            raw_ocr_hint=str(view_item["text"]),
+            ocr_rect=slot_rect,
+        )
     if clamp_hint:
         _prog(clamp_hint)
 
     if not cli.metric_text_changed(original_text, clamped_views):
         _prog("数字相同，跳过")
         return image
-
-    thumb = _infer_thumbnail_rect(title_item, image.width, image.height)
-    strip_roi = _overlay_strip_roi(thumb)
 
     _prog("渲染新数字…")
     image, _report = cli.patch_ocr_rect_with_glyphs(

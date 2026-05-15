@@ -758,6 +758,46 @@ def choose_font_size_for_rendered_height(font_path: str, texts, target_height: i
     return best[1] if best else target_height
 
 
+def choose_feed_overlay_font_size(font_path: str, texts, ink_rect: Dict[str, int]) -> int:
+    """Fit tiny feed overlay digits by visual height and available slot width."""
+
+    ink_h = max(1, int(ink_rect["height"]))
+    if ink_h <= 14:
+        target_height = ink_h + 3
+        target_width = max(6.0, float(ink_rect["width"]) * 1.65)
+    else:
+        target_height = max(8, int(round(ink_h * 0.94)))
+        target_width = max(6.0, float(ink_rect["width"]) * 1.0)
+    weight = _weight_from_font_path(font_path)
+    best = None
+    for size in range(8, min(48, max(12, int(ink_rect["height"]) * 2 + 12)) + 1):
+        font = load_font_by_path(font_path, size)
+        if font is None:
+            font = load_font(size, "medium")
+        heights = []
+        widths = []
+        for text in texts:
+            ts = str(text)
+            if "%" in ts and _use_red_percent_hybrid(ts, font_path_hint=str(font_path), font=font):
+                bbox = rendered_ink_bbox_red_percent_split(ts, size, weight)
+            else:
+                bbox = rendered_ink_bbox(ts, font)
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+            if w > 0 and h > 0:
+                widths.append(w)
+                heights.append(h)
+        if not heights:
+            continue
+        med_h = sorted(heights)[len(heights) // 2]
+        max_w = max(widths)
+        overflow = max(0.0, max_w - target_width)
+        score = abs(med_h - target_height) * 2.0 + overflow * 2.0 + abs(max_w - target_width) * 0.35
+        if best is None or score < best[0]:
+            best = (score, size)
+    return best[1] if best else target_height
+
+
 def red_number_forced_font_for_standalone_patch(
     *,
     ink_rect: Dict[str, int],
@@ -780,17 +820,24 @@ def red_number_forced_font_for_standalone_patch(
     if not any(ch.isdigit() for ch in ot):
         return None
 
-    fp = str(BODY_NATIVE_FONT_PATH)
-    if not Path(fp).is_file():
+    if overlay_views_ink:
+        candidates = (BUNDLED_DIN_PERCENT, RED_NUMBER_REGULAR, RED_NUMBER_MEDIUM, RED_NUMBER_BOLD)
+        fp = next((str(path) for path in candidates if path.is_file()), "")
+    else:
+        fp = str(BODY_NATIVE_FONT_PATH)
+    if not fp or not Path(fp).is_file():
         return None
 
     target_h = max(8, int(ink_rect["height"]))
     texts_for_size = list(dict.fromkeys([ot, nt]))
-    font_size = max(
-        8,
-        int(choose_font_size_for_rendered_height(fp, texts_for_size, target_h))
-        + BODY_NATIVE_FONT_SIZE_ADJUST,
-    )
+    if overlay_views_ink:
+        font_size = choose_feed_overlay_font_size(fp, texts_for_size, ink_rect)
+    else:
+        font_size = max(
+            8,
+            int(choose_font_size_for_rendered_height(fp, texts_for_size, target_h))
+            + BODY_NATIVE_FONT_SIZE_ADJUST,
+        )
     out: Dict = {
         "font_size": font_size,
         "font_path": fp,
@@ -2246,14 +2293,14 @@ def patch_ocr_rect_with_glyphs(
     if ink_rect is None:
         ink_rect = get_ink_rect(source_image, rect, raw_text=raw_text)
 
-    # Localized bright strokes can yield a box shorter than the OCR strip;
-    # calibration keys off ``height`` so text renders too small vs native UI.
+    # Localized bright strokes can be a touch shorter than the source glyphs, but
+    # using the whole OCR strip makes feed overlay numbers visibly oversized.
     if overlay_views_ink:
         oh = max(8, int(rect["height"]))
         ih = max(8, int(ink_rect["height"]))
         span = oh - ih
         if span >= 2:
-            target_h = min(oh, ih + min(span, 14))
+            target_h = min(oh, ih + min(span, max(1, int(round(ih * 0.12)))))
             mid_y = float(ink_rect["y"]) + ih / 2.0
             ink_rect = dict(ink_rect)
             ink_rect["height"] = target_h
@@ -2619,4 +2666,3 @@ def main(argv: Optional[list] = None):
 
 if __name__ == "__main__":
     main()
-

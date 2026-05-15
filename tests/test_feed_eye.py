@@ -166,6 +166,36 @@ class FeedEyeClampViewsTests(unittest.TestCase):
         self.assertEqual(s, "9")
         self.assertIsNotNone(hint)
 
+    def test_range_is_bounded_to_original_digit_slots_before_random(self):
+        class MaxRng:
+            def randint(self, lo, hi):
+                return hi
+
+        s, hint = feed_eye.choose_feed_overlay_views_for_slots(
+            "40",
+            (80, 120),
+            raw_ocr_hint="40",
+            ocr_rect={"x": 0, "y": 0, "width": 22, "height": 14},
+            rng=MaxRng(),
+        )
+        self.assertEqual(s, "99")
+        self.assertIn("80-99", hint or "")
+
+    def test_range_uses_geometric_slots_when_ocr_drops_a_digit(self):
+        class MaxRng:
+            def randint(self, lo, hi):
+                return hi
+
+        s, hint = feed_eye.choose_feed_overlay_views_for_slots(
+            "4",
+            (80, 120),
+            raw_ocr_hint="4",
+            ocr_rect={"x": 0, "y": 0, "width": 22, "height": 14},
+            rng=MaxRng(),
+        )
+        self.assertEqual(s, "99")
+        self.assertIsNotNone(hint)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,6 +65,23 @@ class FontCalibrationTests(unittest.TestCase):
         self.assertEqual(cli.BODY_NATIVE_FORCE_EDGE_VARIANT, "w1x:quantized")
         self.assertEqual(cli.BODY_NATIVE_FORCE_ALPHA_STRENGTH, 0.25)
 
+    def test_feed_overlay_forced_font_prefers_din_overlay_digits(self):
+        chosen = cli.red_number_forced_font_for_standalone_patch(
+            ink_rect={"x": 0, "y": 0, "width": 18, "height": 12},
+            original_text="40",
+            new_text="94",
+            overlay_views_ink=True,
+        )
+
+        if cli.BUNDLED_DIN_PERCENT.is_file():
+            self.assertTrue(str(chosen["font_path"]).endswith("DIN-OT-Medium.ttf"))
+            expected_size = cli.choose_feed_overlay_font_size(
+                str(cli.BUNDLED_DIN_PERCENT),
+                ["40", "94"],
+                {"x": 0, "y": 0, "width": 18, "height": 12},
+            )
+            self.assertEqual(chosen["font_size"], expected_size)
+
     def test_body_font_matching_prefers_closer_digit_widths(self):
         from data_polisher.red_number_fonts import RED_NUMBER_BOLD
 

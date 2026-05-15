@@ -696,14 +696,7 @@ class DataPolisherApp(ctk.CTk):
                 task.original_image = original
 
                 if getattr(task.args, "eye_mode", False):
-                    if hasattr(task.args, "eye_views_range"):
-                        lo, hi = task.args.eye_views_range
-                        chosen_views = str(random.randint(lo, hi))
-                        eye_args = SimpleNamespace(**vars(task.args))
-                        eye_args.eye_views = chosen_views
-                    else:
-                        eye_args = task.args
-                    result = feed_eye.beautify_feed_card_eye(eye_args, on_progress=_progress)
+                    result = feed_eye.beautify_feed_card_eye(task.args, on_progress=_progress)
                 elif hasattr(task.args, "exposure_range"):
                     el, eh = task.args.exposure_range
                     vl, vh = task.args.views_range
