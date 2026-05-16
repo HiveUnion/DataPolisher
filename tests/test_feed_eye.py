@@ -105,6 +105,27 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
         it = feed_eye.find_card_eye_number_item(img, items, title)
         self.assertEqual(it["text"], "17")
 
+    def test_keyword_matches_bluetooth_title_and_picks_two_digit_overlay(self):
+        items = [
+            {
+                "text": "韶雅S1睡眠蓝牙音响：黑",
+                "rect": {"x": 286, "y": 972, "width": 220, "height": 24},
+            },
+        ]
+        title, score = feed_eye.pick_best_title_item(items, "蓝牙")
+        self.assertGreater(score, 0.9)
+
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        views = {
+            "text": "10",
+            "rect": {"x": roi["x"] + 36, "y": roi["y"] + 6, "width": 22, "height": 15},
+        }
+        img = self._img()
+        it = feed_eye.find_card_eye_number_item(img, [title, views], title)
+
+        self.assertEqual(it["text"], "10")
+
     def test_prefers_pure_numeric_in_strip_over_wide_merged(self):
         title = {"text": "标题文案足够长度中文", "rect": {"x": 20, "y": 500, "width": 200, "height": 22}}
         thumb = feed_eye._infer_thumbnail_rect(title, 540, 900)
@@ -178,6 +199,69 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
         self.assertEqual(it["text"], "2")
         self.assertGreaterEqual(it["rect"]["x"], roi["x"] + 34)
         self.assertLess(it["rect"]["x"], roi["x"] + 48)
+
+    def test_refines_single_digit_ocr_box_that_missed_leading_digit(self):
+        title = {"text": "失眠救星韶雅骨传导睡", "rect": {"x": 286, "y": 987, "width": 220, "height": 20}}
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        img = Image.new("RGB", (540, 1200), color=(245, 245, 245))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle(
+            (thumb["x"], thumb["y"], thumb["x"] + thumb["width"], thumb["y"] + thumb["height"]),
+            fill=(164, 132, 112),
+        )
+        draw.rounded_rectangle(
+            (roi["x"] + 5, roi["y"] + 2, roi["x"] + 68, roi["y"] + 25),
+            radius=12,
+            fill=(132, 118, 104),
+        )
+        # A bright texture at the bottom of the ROI should not be treated as
+        # the eye icon anchor.
+        draw.rectangle((roi["x"] + 24, roi["y"] + 28, roi["x"] + 72, roi["y"] + 37), fill=(230, 230, 226))
+        draw.ellipse((roi["x"] + 13, roi["y"] + 6, roi["x"] + 31, roi["y"] + 19), fill=(248, 248, 248))
+        draw.ellipse((roi["x"] + 20, roi["y"] + 10, roi["x"] + 25, roi["y"] + 15), fill=(132, 118, 104))
+        draw.line((roi["x"] + 38, roi["y"] + 6, roi["x"] + 38, roi["y"] + 18), fill=(255, 255, 255), width=3)
+        draw.ellipse((roi["x"] + 44, roi["y"] + 6, roi["x"] + 51, roi["y"] + 12), outline=(255, 255, 255), width=2)
+        draw.ellipse((roi["x"] + 44, roi["y"] + 12, roi["x"] + 51, roi["y"] + 19), outline=(255, 255, 255), width=2)
+        missed_leading = {
+            "text": "8",
+            "rect": {"x": roi["x"] + 44, "y": roi["y"] + 7, "width": 8, "height": 12},
+        }
+
+        it = feed_eye._refine_overlay_item_with_visual_digit(img, roi, missed_leading)
+
+        self.assertEqual(it["text"], "8")
+        self.assertLessEqual(it["rect"]["x"], roi["x"] + 38)
+        self.assertGreaterEqual(it["rect"]["width"], 14)
+
+    def test_ignores_tiny_product_text_in_overlay_roi_and_uses_visual_digit(self):
+        title = {"text": "终于找到专为儿童设计的", "rect": {"x": 19, "y": 681, "width": 225, "height": 22}}
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        img = Image.new("RGB", (540, 1200), color=(245, 245, 245))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle(
+            (thumb["x"], thumb["y"], thumb["x"] + thumb["width"], thumb["y"] + thumb["height"]),
+            fill=(110, 130, 112),
+        )
+        draw.rounded_rectangle(
+            (roi["x"] + 7, roi["y"] + 3, roi["x"] + 56, roi["y"] + 26),
+            radius=12,
+            fill=(92, 104, 94),
+        )
+        draw.ellipse((roi["x"] + 14, roi["y"] + 10, roi["x"] + 30, roi["y"] + 19), fill=(248, 248, 248))
+        draw.ellipse((roi["x"] + 20, roi["y"] + 12, roi["x"] + 24, roi["y"] + 17), fill=(92, 104, 94))
+        draw.line((roi["x"] + 41, roi["y"] + 7, roi["x"] + 41, roi["y"] + 20), fill=(255, 255, 255), width=2)
+        tiny_product_text = {
+            "text": "S41",
+            "rect": {"x": roi["x"] + 100, "y": roi["y"] + 9, "width": 15, "height": 6},
+        }
+
+        with patch("data_polisher.feed_eye.cli.detect_items_with_paddle", return_value=[]):
+            it = feed_eye.find_card_eye_number_item(img, [title, tiny_product_text], title)
+
+        self.assertEqual(it["text"], "1")
+        self.assertLess(it["rect"]["x"], roi["x"] + 55)
 
     def test_raises_when_no_overlay_candidate(self):
         title = {"text": "只有标题足够长度中文", "rect": {"x": 20, "y": 400, "width": 180, "height": 22}}

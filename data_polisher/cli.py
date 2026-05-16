@@ -2476,6 +2476,7 @@ def patch_ocr_rect_with_glyphs(
     overlay_views_ink: bool = False,
     overlay_thumb: Optional[Dict[str, int]] = None,
     overlay_strip: Optional[Dict[str, int]] = None,
+    overlay_anchor_center_y: Optional[float] = None,
 ):
     ink_rect = None
     if overlay_views_ink:
@@ -2587,6 +2588,20 @@ def patch_ocr_rect_with_glyphs(
             cal_font = load_font(calibration["font_size"], "bold")
         nx = _overlay_views_left_nudge_px(original_text, text, font=cal_font)
         calibration["dx"] = int(calibration.get("dx", 0)) + nx
+        if overlay_anchor_center_y is not None:
+            fp_cal = calibration.get("font_path", "") or ""
+            weight_cal = _weight_from_font_path(str(fp_cal) if fp_cal else None)
+            if _use_red_percent_hybrid(str(text), font=cal_font, font_path_hint=str(fp_cal) if fp_cal else None):
+                bbox = rendered_ink_bbox_red_percent_split(str(text), int(calibration["font_size"]), weight_cal)
+            else:
+                bbox = rendered_ink_bbox(str(text), cal_font)
+            rendered_h = max(1, bbox[3] - bbox[1])
+            current_center_y = float(ink_rect["y"]) + int(calibration.get("dy", 0)) + rendered_h / 2.0
+            center_delta = int(round(float(overlay_anchor_center_y) - current_center_y))
+            center_delta = max(-4, min(4, center_delta))
+            calibration["dy"] = int(calibration.get("dy", 0)) + center_delta
+            calibration["overlay_anchor_center_y"] = float(overlay_anchor_center_y)
+            calibration["overlay_anchor_dy_delta"] = center_delta
     image = draw_text_with_calibration(image, ink_rect, text, style, calibration)
     return image, {
         "mode": "font",

@@ -174,6 +174,8 @@ def _overlay_candidate_ok(raw: str, rr: Dict[str, int], roi: Dict[str, int]) -> 
     """条带内 OCR：纯数字优先；否则允许矮宽条内的合并杂框（封面底部叠字常见）。"""
     if not _metric_raw_ok(raw):
         return False
+    if int(rr.get("height", 0)) < max(8, int(round(int(roi["height"]) * 0.22))):
+        return False
     if _is_pure_views_numeric_ocr(raw):
         return True
     if _mixed_metric_fallback_ok(raw):
@@ -282,12 +284,23 @@ def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Op
 
     h, w = mask.shape
     left_limit = max(18, int(w * 0.45))
-    eye_like = [
-        (area, box)
-        for area, box in comps
-        if box[0] < left_limit and area >= 24 and (box[2] - box[0]) >= 6 and (box[3] - box[1]) >= 6
-    ]
+    eye_like = []
+    for area, box in comps:
+        x0, y0, x1, y1 = box
+        bw, bh = x1 - x0, y1 - y0
+        if x0 >= left_limit or area < 24 or bw < 6 or bh < 6:
+            continue
+        # Bright floor/background details can sit at the bottom of the strip and
+        # are much wider than the eye mark. Treat only compact upper components
+        # as the icon anchor; otherwise digit_min_x jumps past the real digits.
+        if y1 > int(h * 0.74) or bw > 30 or bh > 24:
+            continue
+        eye_like.append((area, box))
     eye_right = max((box[2] for _area, box in eye_like), default=max(10, int(w * 0.26)))
+    anchor_center_y = None
+    if eye_like:
+        _area, eye_box = max(eye_like, key=lambda item: item[0])
+        anchor_center_y = compact["y"] + (eye_box[1] + eye_box[3]) / 2.0
     digit_min_x = eye_right + 3
 
     digit_comps = []
@@ -312,7 +325,7 @@ def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Op
     last = keep[-1]
     for _area, box in digit_comps[1:]:
         gap = box[0] - last[2]
-        if gap > 8:
+        if gap > 4:
             break
         if box[2] - keep[0][0] > 42:
             break
@@ -326,7 +339,7 @@ def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Op
     if x1 <= x0 or y1 <= y0:
         return None
     width = max(8, x1 - x0)
-    return {
+    item = {
         "text": "1",
         "rect": {
             "x": compact["x"] + x0,
@@ -335,6 +348,9 @@ def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Op
             "height": max(8, y1 - y0),
         },
     }
+    if anchor_center_y is not None:
+        item["overlay_anchor_center_y"] = anchor_center_y
+    return item
 
 
 def _refine_overlay_item_with_visual_digit(image: Image.Image, roi: Dict[str, int], item: dict) -> dict:
@@ -351,14 +367,25 @@ def _refine_overlay_item_with_visual_digit(image: Image.Image, roi: Dict[str, in
     height = max(1, int(rr.get("height", 1)))
     # Single overlay digits are narrow. A wide box generally means OCR included
     # the eye icon; rendering at that x puts the replacement on top of the icon.
-    if width <= max(14, int(round(height * 1.05))):
-        return item
     visual = _visual_overlay_item_from_roi(image, roi)
     if visual is None:
         return item
+
+    vr = visual["rect"]
+    # Single overlay digits are narrow. A wide OCR box generally means OCR
+    # included the eye icon; conversely, a too-narrow OCR box may have captured
+    # only the rightmost glyph of a two-digit number (e.g. "18" -> "8").
+    wide_ocr_includes_icon = width > max(14, int(round(height * 1.05)))
+    visual_extends_left = int(vr["x"]) < int(rr.get("x", 0)) - max(3, height // 4)
+    visual_covers_ocr = int(vr["x"] + vr["width"]) >= int(rr.get("x", 0)) + max(2, width // 2)
+    visual_is_wider = int(vr["width"]) > width + max(4, height // 3)
+    if not (wide_ocr_includes_icon or (visual_extends_left and visual_covers_ocr and visual_is_wider)):
+        return item
     refined = dict(item)
-    refined["rect"] = dict(visual["rect"])
+    refined["rect"] = dict(vr)
     refined["text"] = item.get("text", raw)
+    if "overlay_anchor_center_y" in visual:
+        refined["overlay_anchor_center_y"] = visual["overlay_anchor_center_y"]
     return refined
 
 
@@ -597,6 +624,7 @@ def beautify_feed_card_eye(
         row_atlas=None,
         raw_text=view_item["text"],
         forced_font=None,
+        overlay_anchor_center_y=view_item.get("overlay_anchor_center_y"),
         overlay_views_ink=True,
         overlay_thumb=thumb,
         overlay_strip=strip_roi,
