@@ -149,6 +149,36 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
         self.assertGreaterEqual(it["rect"]["x"], roi["x"] + 35)
         self.assertLess(it["rect"]["x"], roi["x"] + 48)
 
+    def test_refines_single_digit_ocr_box_that_includes_eye_icon(self):
+        title = {"text": "实测音质不输大牌", "rect": {"x": 286, "y": 836, "width": 220, "height": 24}}
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        img = Image.new("RGB", (540, 1200), color=(245, 245, 245))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle(
+            (thumb["x"], thumb["y"], thumb["x"] + thumb["width"], thumb["y"] + thumb["height"]),
+            fill=(165, 125, 90),
+        )
+        draw.rounded_rectangle(
+            (roi["x"] + 8, roi["y"] + 6, roi["x"] + 58, roi["y"] + 29),
+            radius=12,
+            fill=(112, 104, 92),
+        )
+        draw.ellipse((roi["x"] + 14, roi["y"] + 13, roi["x"] + 30, roi["y"] + 22), fill=(248, 248, 248))
+        draw.ellipse((roi["x"] + 20, roi["y"] + 15, roi["x"] + 24, roi["y"] + 20), fill=(112, 104, 92))
+        draw.text((roi["x"] + 38, roi["y"] + 7), "2", fill=(255, 255, 255))
+        merged = {
+            "text": "2",
+            "rect": {"x": roi["x"] + 12, "y": roi["y"] + 5, "width": 30, "height": 18},
+        }
+
+        with patch("data_polisher.feed_eye.cli.detect_items_with_paddle", return_value=[]):
+            it = feed_eye.find_card_eye_number_item(img, [title, merged], title)
+
+        self.assertEqual(it["text"], "2")
+        self.assertGreaterEqual(it["rect"]["x"], roi["x"] + 34)
+        self.assertLess(it["rect"]["x"], roi["x"] + 48)
+
     def test_raises_when_no_overlay_candidate(self):
         title = {"text": "只有标题足够长度中文", "rect": {"x": 20, "y": 400, "width": 180, "height": 22}}
         img = Image.new("RGB", (540, 700), color=(255, 255, 255))
@@ -234,6 +264,21 @@ class FeedEyeClampViewsTests(unittest.TestCase):
         )
         self.assertEqual(s, "99")
         self.assertIsNotNone(hint)
+
+    def test_range_respects_requested_upper_bound_when_it_fits_slots(self):
+        class MaxRng:
+            def randint(self, lo, hi):
+                return hi
+
+        s, hint = feed_eye.choose_feed_overlay_views_for_slots(
+            "40",
+            (40, 69),
+            raw_ocr_hint="40",
+            ocr_rect={"x": 0, "y": 0, "width": 22, "height": 14},
+            rng=MaxRng(),
+        )
+        self.assertEqual(s, "69")
+        self.assertIsNone(hint)
 
 
 if __name__ == "__main__":

@@ -678,6 +678,23 @@ class DataPolisherApp(ctk.CTk):
         if not pending:
             messagebox.showinfo("提示", "没有等待中的任务。\n\n请先添加图片。")
             return
+        pending_eye = [t for t in pending if getattr(t.args, "eye_mode", False)]
+        if pending_eye:
+            try:
+                self._validate_eye_inputs()
+                title = self.eye_entries["title"].get().strip()
+                rng = _parse_range_pair(
+                    self.entries["eye_views_lo"].get(),
+                    self.entries["eye_views_hi"].get(),
+                    "浏览量范围",
+                    lower_floor=0,
+                )
+            except ValueError as exc:
+                messagebox.showerror("输入有误", str(exc))
+                return
+            for task in pending_eye:
+                task.args.eye_title = title
+                task.args.eye_views_range = rng
         self._stop_requested = False
         self._worker_thread = threading.Thread(target=self._run_all, args=(pending,), daemon=True)
         self._worker_thread.start()

@@ -337,6 +337,31 @@ def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Op
     }
 
 
+def _refine_overlay_item_with_visual_digit(image: Image.Image, roi: Dict[str, int], item: dict) -> dict:
+    """If OCR merged the eye icon into a one-digit box, keep text but use visual digit bounds."""
+
+    raw = unicodedata.normalize("NFKC", str(item.get("text", ""))).strip()
+    rr = item.get("rect", {})
+    if not _is_pure_views_numeric_ocr(raw):
+        return item
+    digit_count = sum(1 for ch in raw if ch.isdigit())
+    if digit_count != 1:
+        return item
+    width = int(rr.get("width", 0))
+    height = max(1, int(rr.get("height", 1)))
+    # Single overlay digits are narrow. A wide box generally means OCR included
+    # the eye icon; rendering at that x puts the replacement on top of the icon.
+    if width <= max(14, int(round(height * 1.05))):
+        return item
+    visual = _visual_overlay_item_from_roi(image, roi)
+    if visual is None:
+        return item
+    refined = dict(item)
+    refined["rect"] = dict(visual["rect"])
+    refined["text"] = item.get("text", raw)
+    return refined
+
+
 def find_card_eye_number_item(image: Image.Image, items: list, title_item: dict) -> dict:
     """定位封面左下角小眼睛旁浏览数字对应的 OCR 框（必要时退回整条几何 ROI）。"""
     w, h = image.size
@@ -347,7 +372,7 @@ def find_card_eye_number_item(image: Image.Image, items: list, title_item: dict)
 
     picked = _pick_overlay_item(items, title_item, thumb, roi, thumb_bottom)
     if picked is not None:
-        return picked
+        return _refine_overlay_item_with_visual_digit(image, roi, picked)
 
     # 条带内二次 OCR（叠字对比度差时全图 OCR 可能漏框）
     import numpy as np
@@ -366,7 +391,7 @@ def find_card_eye_number_item(image: Image.Image, items: list, title_item: dict)
         if not _overlay_candidate_ok(raw, rr, roi):
             continue
         if _is_pure_views_numeric_ocr(raw):
-            return {"text": it["text"], "rect": rr}
+            return _refine_overlay_item_with_visual_digit(image, roi, {"text": it["text"], "rect": rr})
         if rr["width"] < best_w:
             best_w = rr["width"]
             best = {"text": it["text"], "rect": rr}
