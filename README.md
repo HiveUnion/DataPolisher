@@ -85,7 +85,7 @@ PYTHONPATH=. python -m data_polisher.cli \
    * 信息流封面白字用 `localize_feed_overlay_views_ink()`。
 2. 擦除旧字：
    * 普通指标用边缘平均色填充。
-   * 信息流小眼睛用 `inpaint_overlay_views_translucent_fill()`，根据缩略图底色和半透明胶囊颜色重建背景，避免出现一块死灰补丁。
+   * 信息流小眼睛先遮掉旧数字亮色笔画，再用同一胶囊里的干净灰色材质羽化补回，避免把眼睛图标、耳机线或胶囊外背景复制进数字区域。
 3. 渲染新字：
    * 如果有可用 row atlas，优先用原图同行字符像素拼新数字。
    * 详情区默认强制 RED Number Bold，并用原图墨迹高度校准字号。

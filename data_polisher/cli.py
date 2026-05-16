@@ -34,7 +34,7 @@ BUNDLED_DIN_PERCENT = _PKG_STATIC_FONTS / "DIN-OT-Medium.ttf"
 # 信息流封面左下角小眼睛浏览数：样本比对中 jlm_cmss10 的窄身轻字重更贴近原图。
 BUNDLED_FEED_OVERLAY_VIEWS_FONT = _PKG_STATIC_FONTS / "jlm_cmss10.ttf"
 FEED_OVERLAY_VIEWS_FONT_SIZE = 17
-FEED_OVERLAY_VIEWS_DX = -1
+FEED_OVERLAY_VIEWS_DX = -2
 FEED_OVERLAY_VIEWS_DY = 1
 FEED_OVERLAY_VIEWS_ALPHA_GAIN = 1.0
 FEED_OVERLAY_VIEWS_ALPHA_GAMMA = 0.76
@@ -278,6 +278,107 @@ def inpaint_overlay_views_translucent_fill(
     from PIL import Image
 
     return Image.fromarray(np.clip(np.round(patched_arr), 0, 255).astype(np.uint8))
+
+
+def inpaint_overlay_views_stroke_fill(image, source_image, rect: Dict[str, int]):
+    """Erase bright overlay strokes with reconstructed capsule material.
+
+    The feed overlay is a semi-transparent grey capsule plus white icon/text.
+    Copying nearby pixels can drag the eye icon or photo details into the old
+    number slot. Instead, mask the old white strokes, rebuild just those pixels
+    from clean capsule material, and feather the mask.
+    """
+
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    arr = np.asarray(image.convert("RGB"), dtype=np.float32).copy()
+    src = np.asarray(source_image.convert("RGB"), dtype=np.float32)
+    ih, iw = arr.shape[:2]
+    x0, y0, x1, y1 = rect_to_box(rect)
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(iw, x1), min(ih, y1)
+    if x1 <= x0 or y1 <= y0:
+        return image
+
+    crop = src[y0:y1, x0:x1, :]
+    lum = 0.299 * crop[..., 0] + 0.587 * crop[..., 1] + 0.114 * crop[..., 2]
+    spread = crop.max(axis=2) - crop.min(axis=2)
+    mask = (lum > 205.0) & (spread < 105.0)
+    if float(mask.mean()) > 0.35:
+        mask = (lum > 220.0) & (spread < 95.0)
+    if int(mask.sum()) < 2:
+        return image
+
+    seen = np.zeros(mask.shape, dtype=bool)
+    components = []
+    mh, mw = mask.shape
+    for yy in range(mh):
+        for xx in range(mw):
+            if not mask[yy, xx] or seen[yy, xx]:
+                continue
+            stack = [(xx, yy)]
+            seen[yy, xx] = True
+            pts = []
+            while stack:
+                px, py = stack.pop()
+                pts.append((px, py))
+                for ny in range(py - 1, py + 2):
+                    for nx in range(px - 1, px + 2):
+                        if 0 <= nx < mw and 0 <= ny < mh and mask[ny, nx] and not seen[ny, nx]:
+                            seen[ny, nx] = True
+                            stack.append((nx, ny))
+            if len(pts) >= 2:
+                components.append(pts)
+    if components:
+        plausible = []
+        for pts in components:
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            comp_w = max(xs) - min(xs) + 1
+            comp_h = max(ys) - min(ys) + 1
+            touches_top_right = min(ys) == 0 and max(xs) >= mw - 2
+            if comp_h < 4:
+                continue
+            if comp_w > max(8, int(round(mw * 0.42))):
+                continue
+            if touches_top_right:
+                continue
+            plausible.append(pts)
+        kept = sorted(plausible or components, key=len, reverse=True)[: max(1, min(4, len(components)))]
+        clean_mask = np.zeros(mask.shape, dtype=bool)
+        for pts in kept:
+            for px, py in pts:
+                clean_mask[py, px] = True
+        mask = clean_mask
+
+    mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
+    mask_img = mask_img.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.GaussianBlur(0.45))
+
+    cx0, cy0 = max(0, x0 - 20), max(0, y0 - 4)
+    cx1, cy1 = min(iw, x1 + 20), min(ih, y1 + 4)
+    context = src[cy0:cy1, cx0:cx1, :]
+    context_lum = 0.299 * context[..., 0] + 0.587 * context[..., 1] + 0.114 * context[..., 2]
+    context_spread = context.max(axis=2) - context.min(axis=2)
+    capsule_pixels = context[(context_lum > 82.0) & (context_lum < 205.0) & (context_spread < 75.0)]
+    if capsule_pixels.shape[0] < 12:
+        capsule_pixels = context[(context_lum > 70.0) & (context_lum < 220.0)]
+    if capsule_pixels.shape[0] < 1:
+        return image
+
+    material = np.median(capsule_pixels, axis=0)
+    fill = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.float32) + material.reshape(1, 1, 3)
+    if capsule_pixels.shape[0] >= 24:
+        noise = capsule_pixels - np.median(capsule_pixels, axis=0)
+        sample_count = fill.shape[0] * fill.shape[1]
+        sampled = noise[np.arange(sample_count) % noise.shape[0]].reshape(fill.shape)
+        fill = np.clip(fill + sampled * 0.2, 0.0, 255.0)
+
+    fill_img = Image.fromarray(np.clip(np.round(fill), 0, 255).astype(np.uint8))
+    patched = Image.fromarray(np.clip(np.round(arr), 0, 255).astype(np.uint8)).convert("RGBA")
+    patched.paste(fill_img.convert("RGBA"), (x0, y0), mask_img)
+
+    return patched.convert("RGB")
 
 
 def load_font(size: int, weight: str):
@@ -559,6 +660,24 @@ def _overlay_views_left_nudge_px(original_text: str, new_text: str, *, font) -> 
     h_ref = max(1, bo[3] - bo[1], bn[3] - bn[1])
     cap = max(4, min(10, int(round(h_ref * 0.32))))
     return -min(max(1, round(extra * 0.34)), cap)
+
+
+def _feed_overlay_visual_dx(original_text: str, new_text: str) -> int:
+    """Position tiny feed overlay digits by the source slot, not one global offset."""
+
+    old_core = re.sub(r"[^0-9.]", "", normalize_metric_text(original_text))
+    new_core = re.sub(r"[^0-9.]", "", normalize_metric_text(new_text))
+    if len(old_core) >= 2 and len(new_core) >= 2:
+        return -1
+    return FEED_OVERLAY_VIEWS_DX
+
+
+def _feed_overlay_visual_dy(original_text: str, new_text: str) -> int:
+    old_core = re.sub(r"[^0-9.]", "", normalize_metric_text(original_text))
+    new_core = re.sub(r"[^0-9.]", "", normalize_metric_text(new_text))
+    if len(old_core) >= 2 and len(new_core) >= 2:
+        return 0
+    return FEED_OVERLAY_VIEWS_DY
 
 
 def rendered_ink_stats(text: str, font):
@@ -875,8 +994,8 @@ def red_number_forced_font_for_standalone_patch(
         if BODY_NATIVE_FORCE_ALPHA_STRENGTH is not None:
             out["force_alpha_match_strength"] = BODY_NATIVE_FORCE_ALPHA_STRENGTH
     else:
-        out["overlay_visual_dx"] = FEED_OVERLAY_VIEWS_DX
-        out["overlay_visual_dy"] = FEED_OVERLAY_VIEWS_DY
+        out["overlay_visual_dx"] = _feed_overlay_visual_dx(ot, nt)
+        out["overlay_visual_dy"] = _feed_overlay_visual_dy(ot, nt)
         out["overlay_alpha_gain"] = FEED_OVERLAY_VIEWS_ALPHA_GAIN
         out["overlay_alpha_gamma"] = FEED_OVERLAY_VIEWS_ALPHA_GAMMA
         out["overlay_color"] = (255, 255, 255)
@@ -1754,6 +1873,17 @@ def localize_feed_overlay_views_ink(
     by high-percentile luminance relative to the crop median background.
     """
 
+    source_rect = dict(rect)
+    image_size = {"width": image.width, "height": image.height}
+    pad_x = max(2, int(rect["width"]) // 4)
+    pad_y = max(4, int(rect["height"]) // 2)
+    rect = {
+        "x": max(0, int(rect["x"]) - pad_x),
+        "y": max(0, int(rect["y"]) - pad_y),
+        "width": min(image_size["width"] - max(0, int(rect["x"]) - pad_x), int(rect["width"]) + pad_x * 2),
+        "height": min(image_size["height"] - max(0, int(rect["y"]) - pad_y), int(rect["height"]) + pad_y * 2),
+    }
+
     pixels = crop_pixels(image, rect)
     if not pixels:
         return None
@@ -1857,12 +1987,18 @@ def localize_feed_overlay_views_ink(
     if max_y < min_y:
         min_y, max_y = 0, height - 1
 
-    return {
+    out = {
         "x": rect["x"] + best_a,
         "y": rect["y"] + min_y,
         "width": best_b - best_a + 1,
         "height": max_y - min_y + 1,
     }
+    source_h = max(1, int(source_rect["height"]))
+    if out["height"] > source_h + max(2, source_h // 4):
+        max_up = max(4, int(round(source_h * 0.35)))
+        out["y"] = max(0, max(out["y"], int(source_rect["y"]) - max_up))
+        out["height"] = min(out["height"], source_h + 2)
+    return out
 
 
 def get_ink_rect(image, rect: Dict[str, int], raw_text: str = "") -> Dict[str, int]:
@@ -2370,20 +2506,22 @@ def patch_ocr_rect_with_glyphs(
         if auto_ff is not None:
             effective_forced_font = auto_ff
 
-    # Erase old glyphs: overlay uses minimal padding + capsule-toned fill (not wide edge slab).
+    # Erase old glyphs: overlay uses minimal padding and only removes bright strokes.
     if overlay_views_ink:
-        padded = expand_rect(ink_rect, 1, image_size)
-        if overlay_thumb is not None and overlay_strip is not None:
-            image = inpaint_overlay_views_translucent_fill(
-                image,
-                source_image,
-                padded,
-                ink_rect,
-                overlay_thumb,
-                overlay_strip,
+        erase_basis = dict(rect)
+        if ink_rect is not None:
+            erase_basis["x"] = max(int(rect["x"]), int(ink_rect["x"]) - 1)
+            erase_basis["y"] = max(0, min(int(rect["y"]), int(ink_rect["y"])))
+            erase_basis["width"] = min(
+                image_size["width"] - erase_basis["x"],
+                max(int(rect["width"]) + 2, int(ink_rect["width"])),
             )
-        else:
-            image = inpaint_overlay_views_compact_fill(image, padded)
+            erase_basis["height"] = min(
+                image_size["height"] - erase_basis["y"],
+                max(int(rect["height"]) + 2, int(ink_rect["height"])),
+            )
+        padded = expand_rect(erase_basis, 1, image_size)
+        image = inpaint_overlay_views_stroke_fill(image, source_image, padded)
     else:
         padded = expand_rect(ink_rect, max(2, ink_rect["height"] // 5), image_size)
         image = inpaint_or_fill(image, padded)
