@@ -353,7 +353,13 @@ def inpaint_overlay_views_stroke_fill(image, source_image, rect: Dict[str, int])
         mask = clean_mask
 
     mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
-    mask_img = mask_img.filter(ImageFilter.MaxFilter(7)).filter(ImageFilter.GaussianBlur(0.45))
+    if min(mw, mh) <= 14:
+        max_filter_size, blur_radius = 3, 1.2
+    elif min(mw, mh) <= 22:
+        max_filter_size, blur_radius = 5, 1.0
+    else:
+        max_filter_size, blur_radius = 7, 0.8
+    mask_img = mask_img.filter(ImageFilter.MaxFilter(max_filter_size)).filter(ImageFilter.GaussianBlur(blur_radius))
 
     cx0, cy0 = max(0, x0 - 20), max(0, y0 - 4)
     cx1, cy1 = min(iw, x1 + 20), min(ih, y1 + 4)
@@ -372,7 +378,7 @@ def inpaint_overlay_views_stroke_fill(image, source_image, rect: Dict[str, int])
         noise = capsule_pixels - np.median(capsule_pixels, axis=0)
         sample_count = fill.shape[0] * fill.shape[1]
         sampled = noise[np.arange(sample_count) % noise.shape[0]].reshape(fill.shape)
-        fill = np.clip(fill + sampled * 0.2, 0.0, 255.0)
+        fill = np.clip(fill + sampled * 0.3, 0.0, 255.0)
 
     fill_img = Image.fromarray(np.clip(np.round(fill), 0, 255).astype(np.uint8))
     patched = Image.fromarray(np.clip(np.round(arr), 0, 255).astype(np.uint8)).convert("RGBA")
