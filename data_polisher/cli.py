@@ -352,33 +352,56 @@ def inpaint_overlay_views_stroke_fill(image, source_image, rect: Dict[str, int])
                 clean_mask[py, px] = True
         mask = clean_mask
 
-    mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
     if min(mw, mh) <= 14:
         max_filter_size, blur_radius = 3, 1.2
     elif min(mw, mh) <= 22:
         max_filter_size, blur_radius = 5, 1.0
     else:
         max_filter_size, blur_radius = 7, 0.8
-    mask_img = mask_img.filter(ImageFilter.MaxFilter(max_filter_size)).filter(ImageFilter.GaussianBlur(blur_radius))
 
-    cx0, cy0 = max(0, x0 - 20), max(0, y0 - 4)
-    cx1, cy1 = min(iw, x1 + 20), min(ih, y1 + 4)
-    context = src[cy0:cy1, cx0:cx1, :]
-    context_lum = 0.299 * context[..., 0] + 0.587 * context[..., 1] + 0.114 * context[..., 2]
-    context_spread = context.max(axis=2) - context.min(axis=2)
-    capsule_pixels = context[(context_lum > 82.0) & (context_lum < 205.0) & (context_spread < 75.0)]
-    if capsule_pixels.shape[0] < 12:
-        capsule_pixels = context[(context_lum > 70.0) & (context_lum < 220.0)]
-    if capsule_pixels.shape[0] < 1:
+    hard_mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L").filter(
+        ImageFilter.MaxFilter(max_filter_size)
+    )
+    repair_mask = np.asarray(hard_mask_img, dtype=np.uint8) > 0
+    mask_img = hard_mask_img.filter(ImageFilter.GaussianBlur(blur_radius))
+
+    fill = crop.copy()
+    unknown = repair_mask.copy()
+    known = ~unknown
+    if not known.any():
         return image
 
-    material = np.median(capsule_pixels, axis=0)
-    fill = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.float32) + material.reshape(1, 1, 3)
-    if capsule_pixels.shape[0] >= 24:
-        noise = capsule_pixels - np.median(capsule_pixels, axis=0)
-        sample_count = fill.shape[0] * fill.shape[1]
-        sampled = noise[np.arange(sample_count) % noise.shape[0]].reshape(fill.shape)
-        fill = np.clip(fill + sampled * 0.3, 0.0, 255.0)
+    # Reconstruct old white strokes from immediately adjacent capsule pixels.
+    # The capsule is translucent over arbitrary photos; local diffusion preserves
+    # wood grain/highlight gradients much better than a single median fill.
+    for _ in range(max(8, mw + mh)):
+        if not unknown.any():
+            break
+        new_fill = fill.copy()
+        new_known = known.copy()
+        ys, xs = np.where(unknown)
+        for yy, xx in zip(ys.tolist(), xs.tolist()):
+            samples = []
+            for ny in range(max(0, yy - 1), min(mh, yy + 2)):
+                for nx in range(max(0, xx - 1), min(mw, xx + 2)):
+                    if ny == yy and nx == xx:
+                        continue
+                    if known[ny, nx]:
+                        samples.append(fill[ny, nx])
+            if samples:
+                new_fill[yy, xx] = np.mean(np.asarray(samples, dtype=np.float32), axis=0)
+                new_known[yy, xx] = True
+        if np.array_equal(new_known, known):
+            break
+        fill = new_fill
+        known = new_known
+        unknown = ~known
+
+    if unknown.any():
+        known_pixels = fill[known]
+        if known_pixels.shape[0] < 1:
+            return image
+        fill[unknown] = np.median(known_pixels, axis=0)
 
     fill_img = Image.fromarray(np.clip(np.round(fill), 0, 255).astype(np.uint8))
     patched = Image.fromarray(np.clip(np.round(arr), 0, 255).astype(np.uint8)).convert("RGBA")

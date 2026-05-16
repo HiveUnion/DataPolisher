@@ -26,6 +26,20 @@ class FeedEyeTitlePickTests(unittest.TestCase):
         self.assertIn("耳机", best["text"])
         self.assertGreater(score, 0.8)
 
+    def test_prefers_feed_title_over_cover_text_for_same_keyword(self):
+        items = [
+            {"text": "护耳式", "rect": {"x": 35, "y": 331, "width": 69, "height": 25}},
+            {"text": "儿童耳机", "rect": {"x": 54, "y": 352, "width": 95, "height": 31}},
+            {"text": "送侄子的儿童耳机到了，", "rect": {"x": 20, "y": 584, "width": 211, "height": 21}},
+            {"text": "小家伙爱不释手！", "rect": {"x": 19, "y": 612, "width": 153, "height": 21}},
+            {"text": "昨天17:40", "rect": {"x": 53, "y": 664, "width": 59, "height": 14}},
+        ]
+
+        best, score = feed_eye.pick_best_title_item(items, "耳机")
+
+        self.assertEqual(best["text"], "送侄子的儿童耳机到了，")
+        self.assertGreater(score, 0.9)
+
     def test_raises_when_no_title_candidate(self):
         items = [{"text": "123", "rect": {"x": 0, "y": 0, "width": 1, "height": 1}}]
         with self.assertRaises(RuntimeError):
@@ -230,9 +244,66 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
 
         it = feed_eye._refine_overlay_item_with_visual_digit(img, roi, missed_leading)
 
-        self.assertEqual(it["text"], "8")
+        self.assertEqual(it["text"], "18")
         self.assertLessEqual(it["rect"]["x"], roi["x"] + 38)
         self.assertGreaterEqual(it["rect"]["width"], 14)
+
+    def test_visual_fallback_recognizes_zero_digit(self):
+        title = {"text": "睡眠蓝牙音箱", "rect": {"x": 286, "y": 987, "width": 220, "height": 20}}
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        img = Image.new("RGB", (540, 1200), color=(245, 245, 245))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle(
+            (thumb["x"], thumb["y"], thumb["x"] + thumb["width"], thumb["y"] + thumb["height"]),
+            fill=(150, 128, 112),
+        )
+        draw.rounded_rectangle(
+            (roi["x"] + 5, roi["y"] + 2, roi["x"] + 64, roi["y"] + 25),
+            radius=12,
+            fill=(128, 116, 104),
+        )
+        draw.ellipse((roi["x"] + 13, roi["y"] + 6, roi["x"] + 31, roi["y"] + 19), fill=(248, 248, 248))
+        draw.ellipse((roi["x"] + 20, roi["y"] + 10, roi["x"] + 25, roi["y"] + 15), fill=(128, 116, 104))
+        font = cli.load_font_by_path(str(cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT), 17)
+        draw.text((roi["x"] + 37, roi["y"] + 1), "0", fill=(255, 255, 255), font=font)
+
+        it = feed_eye._visual_overlay_item_from_roi(img, roi)
+
+        self.assertIsNotNone(it)
+        self.assertEqual(it["text"], "0")
+
+    def test_refines_two_digit_ocr_with_matching_visual_anchor(self):
+        title = {"text": "骨传导睡眠音箱-让枕头", "rect": {"x": 20, "y": 942, "width": 213, "height": 21}}
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        img = Image.new("RGB", (540, 1200), color=(245, 245, 245))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle(
+            (thumb["x"], thumb["y"], thumb["x"] + thumb["width"], thumb["y"] + thumb["height"]),
+            fill=(112, 78, 38),
+        )
+        draw.rounded_rectangle(
+            (roi["x"] + 5, roi["y"] + 2, roi["x"] + 70, roi["y"] + 26),
+            radius=12,
+            fill=(94, 68, 42),
+        )
+        draw.ellipse((roi["x"] + 13, roi["y"] + 6, roi["x"] + 31, roi["y"] + 19), fill=(248, 248, 248))
+        draw.ellipse((roi["x"] + 20, roi["y"] + 10, roi["x"] + 25, roi["y"] + 15), fill=(94, 68, 42))
+        font = cli.load_font_by_path(str(cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT), 17)
+        draw.text((roi["x"] + 39, roi["y"] + 5), "16", fill=(255, 255, 255), font=font)
+        ocr_item = {
+            "text": "16",
+            "rect": {"x": roi["x"] + 36, "y": roi["y"] + 1, "width": 23, "height": 18},
+        }
+
+        it = feed_eye._refine_overlay_item_with_visual_digit(img, roi, ocr_item)
+
+        self.assertEqual(it["text"], "16")
+        self.assertIn("overlay_anchor_center_y", it)
+        self.assertIn("overlay_visual_score", it)
+        self.assertGreaterEqual(it["rect"]["y"], roi["y"] + 4)
+        self.assertLess(it["rect"]["height"], ocr_item["rect"]["height"])
 
     def test_ignores_tiny_product_text_in_overlay_roi_and_uses_visual_digit(self):
         title = {"text": "终于找到专为儿童设计的", "rect": {"x": 19, "y": 681, "width": 225, "height": 22}}

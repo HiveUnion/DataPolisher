@@ -1,7 +1,14 @@
 import unittest
 
+from PIL import Image, ImageDraw
+
 from data_polisher.core import calculate_metrics, detect_dark_text_bounds
-from data_polisher.cli import normalize_metric_text, segment_glyph_boxes, style_distance
+from data_polisher.cli import (
+    inpaint_overlay_views_stroke_fill,
+    normalize_metric_text,
+    segment_glyph_boxes,
+    style_distance,
+)
 from data_polisher.ocr import extract_ocr_text_bounds
 
 
@@ -97,6 +104,32 @@ class GlyphSegmentationTest(unittest.TestCase):
                 {"x": 7, "y": 0, "width": 2, "height": 5},
             ],
         )
+
+
+class OverlayStrokeInpaintTests(unittest.TestCase):
+    def test_erases_bright_core_and_antialias_halo(self):
+        image = Image.new("RGB", (64, 36), (120, 72, 42))
+        draw = ImageDraw.Draw(image)
+        for x in range(64):
+            color = (110 + x // 3, 62 + x // 5, 38 + x // 7)
+            draw.line((x, 0, x, 35), fill=color)
+        draw.rounded_rectangle((6, 8, 48, 28), radius=10, fill=(88, 62, 48))
+        before_bg = image.getpixel((26, 18))
+        draw.line((25, 10, 25, 25), fill=(190, 190, 184), width=5)
+        draw.line((25, 10, 25, 25), fill=(255, 255, 255), width=3)
+
+        patched = inpaint_overlay_views_stroke_fill(
+            image,
+            image,
+            {"x": 20, "y": 8, "width": 12, "height": 22},
+        )
+
+        center = patched.getpixel((25, 18))
+        halo = patched.getpixel((23, 18))
+        self.assertLess(sum(center) / 3, 170)
+        self.assertLess(sum(halo) / 3, 170)
+        self.assertLess(abs(center[0] - before_bg[0]), 55)
+        self.assertEqual(patched.getpixel((4, 4)), image.getpixel((4, 4)))
 
 
 class HeaderViewPickTests(unittest.TestCase):
