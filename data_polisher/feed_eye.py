@@ -468,7 +468,11 @@ def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Op
     lum = arr.mean(axis=2)
     spread = arr.max(axis=2) - arr.min(axis=2)
     bg = float(np.median(lum))
-    mask = (lum > max(185.0, bg + 28.0)) & (spread < 80)
+    # On pale covers the ROI median can be close to white because most pixels
+    # are outside the gray capsule. Cap the threshold so the white eye/digits
+    # still enter the mask while beige background remains below it.
+    bright_thr = max(185.0, min(bg + 28.0, 244.0))
+    mask = (lum > bright_thr) & (spread < 80)
 
     comps = _bright_components(mask)
     if not comps:

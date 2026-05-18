@@ -273,6 +273,27 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
         self.assertIsNotNone(it)
         self.assertEqual(it["text"], "0")
 
+    def test_visual_fallback_handles_pale_cover_around_capsule(self):
+        title = {"text": "2026春招盯紧这波大厂！", "rect": {"x": 19, "y": 943, "width": 216, "height": 21}}
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        img = Image.new("RGB", (540, 1200), color=(236, 229, 210))
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle(
+            (roi["x"] + 8, roi["y"] + 1, roi["x"] + 57, roi["y"] + 26),
+            radius=13,
+            fill=(190, 190, 184),
+        )
+        draw.ellipse((roi["x"] + 17, roi["y"] + 6, roi["x"] + 35, roi["y"] + 18), fill=(248, 248, 248))
+        draw.ellipse((roi["x"] + 24, roi["y"] + 10, roi["x"] + 29, roi["y"] + 15), fill=(190, 190, 184))
+        draw.line((roi["x"] + 42, roi["y"] + 6, roi["x"] + 42, roi["y"] + 18), fill=(255, 255, 255), width=3)
+
+        it = feed_eye._visual_overlay_item_from_roi(img, roi)
+
+        self.assertIsNotNone(it)
+        self.assertEqual(it["text"], "1")
+        self.assertIn("overlay_anchor_center_y", it)
+
     def test_refines_two_digit_ocr_with_matching_visual_anchor(self):
         title = {"text": "骨传导睡眠音箱-让枕头", "rect": {"x": 20, "y": 942, "width": 213, "height": 21}}
         thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
