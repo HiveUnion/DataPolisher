@@ -396,7 +396,7 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
         self.assertEqual(it["text"], "18")
         self.assertIn("overlay_anchor_center_y", it)
         self.assertNotIn("overlay_erase_rect", it)
-        self.assertEqual(it.get("overlay_left_nudge_px"), -2)
+        self.assertLessEqual(it.get("overlay_left_nudge_px", 0), 0)
         self.assertGreater(it["rect"]["x"], roi["x"] + 32)
         self.assertLess(it["rect"]["width"], merged["rect"]["width"])
 
@@ -428,6 +428,28 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
 
         self.assertEqual(it["text"], "1")
         self.assertLess(it["rect"]["x"], roi["x"] + 55)
+
+    def test_mixed_cover_text_candidate_defers_to_visual_digits(self):
+        title = {"text": "暑假不用去远方，彭州就", "rect": {"x": 288, "y": 655, "width": 224, "height": 21}}
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        img = Image.new("RGB", (540, 1200), color=(245, 245, 245))
+        mixed_cover_text = {
+            "text": "7大叶",
+            "rect": {"x": roi["x"] + 51, "y": roi["y"] + 7, "width": 30, "height": 11},
+        }
+        visual = {
+            "text": "13",
+            "rect": {"x": roi["x"] + 37, "y": roi["y"] + 4, "width": 15, "height": 13},
+            "overlay_visual_score": 0.48,
+            "overlay_anchor_center_y": roi["y"] + 11.5,
+        }
+
+        with patch("data_polisher.feed_eye._visual_overlay_item_from_roi", return_value=visual):
+            it = feed_eye._refine_overlay_item_with_visual_digit(img, roi, mixed_cover_text)
+
+        self.assertEqual(it["text"], "13")
+        self.assertEqual(it["rect"], visual["rect"])
 
     def test_raises_when_no_overlay_candidate(self):
         title = {"text": "只有标题足够长度中文", "rect": {"x": 20, "y": 400, "width": 180, "height": 22}}

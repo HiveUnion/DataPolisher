@@ -131,6 +131,49 @@ class OverlayStrokeInpaintTests(unittest.TestCase):
         self.assertLess(abs(center[0] - before_bg[0]), 55)
         self.assertEqual(patched.getpixel((4, 4)), image.getpixel((4, 4)))
 
+    def test_erases_tiny_antialias_fragments_in_digit_lane(self):
+        image = Image.new("RGB", (64, 36), (128, 140, 148))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((6, 8, 50, 29), radius=10, fill=(118, 126, 132))
+        before_bg = image.getpixel((34, 24))
+        draw.line((30, 12, 30, 23), fill=(255, 255, 255), width=2)
+        # Low, disconnected JPEG-like edge fragments used to be filtered out by
+        # component height and survived below the replacement digits.
+        for pt in ((29, 25), (30, 26), (36, 25)):
+            draw.point(pt, fill=(176, 178, 178))
+
+        patched = inpaint_overlay_views_stroke_fill(
+            image,
+            image,
+            {"x": 26, "y": 10, "width": 14, "height": 19},
+        )
+
+        for pt in ((29, 25), (30, 26), (36, 25)):
+            px = patched.getpixel(pt)
+            self.assertLess(abs(px[0] - before_bg[0]), 45)
+            self.assertLess(abs(px[1] - before_bg[1]), 45)
+            self.assertLess(abs(px[2] - before_bg[2]), 45)
+
+    def test_erases_dim_compression_residue_between_digit_strokes(self):
+        image = Image.new("RGB", (64, 36), (128, 140, 148))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((6, 8, 52, 29), radius=10, fill=(118, 126, 132))
+        before_bg = image.getpixel((33, 18))
+        draw.line((29, 12, 29, 23), fill=(255, 255, 255), width=2)
+        draw.line((38, 12, 38, 23), fill=(255, 255, 255), width=2)
+        draw.point((33, 18), fill=(150, 152, 152))
+
+        patched = inpaint_overlay_views_stroke_fill(
+            image,
+            image,
+            {"x": 26, "y": 10, "width": 16, "height": 18},
+        )
+
+        px = patched.getpixel((33, 18))
+        self.assertLess(abs(px[0] - before_bg[0]), 45)
+        self.assertLess(abs(px[1] - before_bg[1]), 45)
+        self.assertLess(abs(px[2] - before_bg[2]), 45)
+
 
 class HeaderViewPickTests(unittest.TestCase):
     """顶部统计行：从左第一个数字为小眼睛（排除左侧日期）。"""

@@ -646,6 +646,14 @@ def _visual_overlay_item_from_roi(
                 score += 0.70
             else:
                 score -= min(0.55, abs(digit_len - expected_digit_count) * 0.35)
+        else:
+            # High thresholds can see only the brightest leading stroke ("1")
+            # while a lower threshold reveals the complete count ("13").  Favor
+            # the fuller sequence when it is still a plausible recognition.
+            if digit_len >= 2 and score >= 0.24:
+                score += min(0.50, 0.36 * (digit_len - 1))
+            if digit_len == 1 and width <= max(2, int(round(h * 0.08))):
+                score -= 0.28
         if text.startswith("0") and len(text) > 1:
             score -= 0.18
         if width > 38:
@@ -686,6 +694,9 @@ def _refine_overlay_item_with_visual_digit(image: Image.Image, roi: Dict[str, in
     raw = unicodedata.normalize("NFKC", str(item.get("text", ""))).strip()
     rr = item.get("rect", {})
     if not _is_pure_views_numeric_ocr(raw):
+        visual = _visual_overlay_item_from_roi(image, roi)
+        if visual is not None:
+            return visual
         return item
     digit_count = sum(1 for ch in raw if ch.isdigit())
     width = int(rr.get("width", 0))

@@ -46,14 +46,14 @@ PYTHONPATH=. python -m data_polisher.cli \
 * `REDNumber-Bold.otf`：详细数据区的大号指标数字，如曝光数、观看数、点击率、互动率。用于替代原先的截图字形，保证详情区数字统一、接近小红书数据页样式。
 * `REDNumber-Regular.ttf` / `REDNumber-Medium.ttf`：顶部小眼睛观看数的候选字体。顶部栏数字比详情区小、更轻，逻辑会优先用 Regular / Medium，而不是 Bold。
 * `DIN-OT-Medium.ttf`：百分号 `%` 单独用 DIN 渲染，再和 RED Number 数字拼接，避免 RED Number 没有合适百分号或百分号过粗。
-* `jlm_cmss10.ttf`：信息流封面左下角“小眼睛”白色浏览数字。按样本 `40` 逐字体比对后，它的窄身轻字重比 DIN / RED Number 更贴近原图。
+* `jlm_cmss10.ttf`：信息流封面左下角“小眼睛”白色浏览数字。它的窄身轻字重比 RED Number 更贴近原图。
 
 字体选择入口主要在 `data_polisher/cli.py`：
 
 * `BODY_NATIVE_FONT_PATH`：详细数据区主字体，优先 `REDNumber-Bold.otf`。
 * `build_header_views_forced_font()`：顶部小眼睛观看数，优先 Regular / Medium，并带 `HEADER_VIEWS_FONT_ADJUST = -2` 的小号修正。
-* `red_number_forced_font_for_standalone_patch(..., overlay_views_ink=True)`：信息流封面小眼睛浏览数，优先 `jlm_cmss10.ttf`，并使用按样张微调过的字号、位移和 alpha。
-* `choose_feed_overlay_font_size()`：信息流小眼睛专用字号选择；对已校准的 `jlm_cmss10.ttf` 固定使用视觉确认后的字号。
+* `red_number_forced_font_for_standalone_patch(..., overlay_views_ink=True)`：信息流封面小眼睛浏览数，使用 `BUNDLED_FEED_OVERLAY_VIEWS_FONT`（默认 `jlm_cmss10.ttf`），先用原数字文本对齐原墨迹框选字号，再用同一字号渲染新数字，不做字体横向变形。
+* `choose_feed_overlay_font_size()`：信息流小眼睛专用字号选择；参考原数字墨迹高度和宽度，让字号由旧图决定。
 
 ### 详细数据 Tab 如何定位
 
@@ -90,7 +90,7 @@ PYTHONPATH=. python -m data_polisher.cli \
    * 如果有可用 row atlas，优先用原图同行字符像素拼新数字。
    * 详情区默认强制 RED Number Bold，并用原图墨迹高度校准字号。
    * 顶部小眼睛用更轻的小号 RED Number。
-   * 信息流封面小眼睛用 `jlm_cmss10.ttf`，并走专用的细 alpha 白字渲染，避免遮挡小眼睛图标。
+   * 信息流封面小眼睛默认用 **`jlm_cmss10.ttf`**（`BUNDLED_FEED_OVERLAY_VIEWS_FONT`），并匹配原数字的尺寸、白色取样、alpha 分布和边缘锯齿。
 4. 最后按原文字颜色、alpha 分布、边缘风格做 mask 匹配，让新字的锯齿和透明度尽量贴近原图。
 
 ### 范围输入与位数限制
@@ -116,8 +116,9 @@ pip install -r requirements-dev.txt
 python build_app.py
 ```
 
-* macOS：产出 `dist/DataPolisher.app`
-* Windows：产出 `dist/DataPolisher/DataPolisher.exe`
+* macOS：产出 `dist/DataPolisher.app`。Finder / Dock 图标默认由构建脚本根据 `data_polisher/static/logo.png` 自动生成 `.icns` 并传给 PyInstaller；若你已放好手工图标，可优先使用 `assets/DataPolisher.icns`（Windows 对应 `assets/DataPolisher.ico`）。
+* Windows：产出 `dist/DataPolisher/DataPolisher.exe`，图标同上（自动生成 `.ico` 或使用 `assets/DataPolisher.ico`）。
+* GUI 主界面侧边栏仅保留「DataPolisher」标题文字，不再嵌入选大图 Logo。
 
 > PaddleOCR / paddlepaddle 体积较大，构建后的安装包通常 800MB 以上，属于正常现象。
 
