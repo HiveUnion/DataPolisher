@@ -352,33 +352,56 @@ def inpaint_overlay_views_stroke_fill(image, source_image, rect: Dict[str, int])
                 clean_mask[py, px] = True
         mask = clean_mask
 
-    mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
     if min(mw, mh) <= 14:
         max_filter_size, blur_radius = 3, 1.2
     elif min(mw, mh) <= 22:
         max_filter_size, blur_radius = 5, 1.0
     else:
         max_filter_size, blur_radius = 7, 0.8
-    mask_img = mask_img.filter(ImageFilter.MaxFilter(max_filter_size)).filter(ImageFilter.GaussianBlur(blur_radius))
 
-    cx0, cy0 = max(0, x0 - 20), max(0, y0 - 4)
-    cx1, cy1 = min(iw, x1 + 20), min(ih, y1 + 4)
-    context = src[cy0:cy1, cx0:cx1, :]
-    context_lum = 0.299 * context[..., 0] + 0.587 * context[..., 1] + 0.114 * context[..., 2]
-    context_spread = context.max(axis=2) - context.min(axis=2)
-    capsule_pixels = context[(context_lum > 82.0) & (context_lum < 205.0) & (context_spread < 75.0)]
-    if capsule_pixels.shape[0] < 12:
-        capsule_pixels = context[(context_lum > 70.0) & (context_lum < 220.0)]
-    if capsule_pixels.shape[0] < 1:
+    hard_mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L").filter(
+        ImageFilter.MaxFilter(max_filter_size)
+    )
+    repair_mask = np.asarray(hard_mask_img, dtype=np.uint8) > 0
+    mask_img = hard_mask_img.filter(ImageFilter.GaussianBlur(blur_radius))
+
+    fill = crop.copy()
+    unknown = repair_mask.copy()
+    known = ~unknown
+    if not known.any():
         return image
 
-    material = np.median(capsule_pixels, axis=0)
-    fill = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.float32) + material.reshape(1, 1, 3)
-    if capsule_pixels.shape[0] >= 24:
-        noise = capsule_pixels - np.median(capsule_pixels, axis=0)
-        sample_count = fill.shape[0] * fill.shape[1]
-        sampled = noise[np.arange(sample_count) % noise.shape[0]].reshape(fill.shape)
-        fill = np.clip(fill + sampled * 0.3, 0.0, 255.0)
+    # Reconstruct old white strokes from immediately adjacent capsule pixels.
+    # The capsule is translucent over arbitrary photos; local diffusion preserves
+    # wood grain/highlight gradients much better than a single median fill.
+    for _ in range(max(8, mw + mh)):
+        if not unknown.any():
+            break
+        new_fill = fill.copy()
+        new_known = known.copy()
+        ys, xs = np.where(unknown)
+        for yy, xx in zip(ys.tolist(), xs.tolist()):
+            samples = []
+            for ny in range(max(0, yy - 1), min(mh, yy + 2)):
+                for nx in range(max(0, xx - 1), min(mw, xx + 2)):
+                    if ny == yy and nx == xx:
+                        continue
+                    if known[ny, nx]:
+                        samples.append(fill[ny, nx])
+            if samples:
+                new_fill[yy, xx] = np.mean(np.asarray(samples, dtype=np.float32), axis=0)
+                new_known[yy, xx] = True
+        if np.array_equal(new_known, known):
+            break
+        fill = new_fill
+        known = new_known
+        unknown = ~known
+
+    if unknown.any():
+        known_pixels = fill[known]
+        if known_pixels.shape[0] < 1:
+            return image
+        fill[unknown] = np.median(known_pixels, axis=0)
 
     fill_img = Image.fromarray(np.clip(np.round(fill), 0, 255).astype(np.uint8))
     patched = Image.fromarray(np.clip(np.round(arr), 0, 255).astype(np.uint8)).convert("RGBA")
@@ -2476,9 +2499,15 @@ def patch_ocr_rect_with_glyphs(
     overlay_views_ink: bool = False,
     overlay_thumb: Optional[Dict[str, int]] = None,
     overlay_strip: Optional[Dict[str, int]] = None,
+    overlay_anchor_center_y: Optional[float] = None,
+    overlay_left_nudge_px: Optional[int] = None,
+    overlay_use_input_rect: bool = False,
+    overlay_erase_rect: Optional[Dict[str, int]] = None,
 ):
     ink_rect = None
-    if overlay_views_ink:
+    if overlay_views_ink and overlay_use_input_rect:
+        ink_rect = dict(rect)
+    elif overlay_views_ink:
         ink_rect = localize_feed_overlay_views_ink(source_image, rect, raw_text=raw_text)
     if ink_rect is None:
         ink_rect = get_ink_rect(source_image, rect, raw_text=raw_text)
@@ -2514,8 +2543,8 @@ def patch_ocr_rect_with_glyphs(
 
     # Erase old glyphs: overlay uses minimal padding and only removes bright strokes.
     if overlay_views_ink:
-        erase_basis = dict(rect)
-        if ink_rect is not None:
+        erase_basis = dict(overlay_erase_rect) if overlay_erase_rect else dict(rect)
+        if ink_rect is not None and not overlay_erase_rect:
             erase_basis["x"] = max(int(rect["x"]), int(ink_rect["x"]) - 1)
             erase_basis["y"] = max(0, min(int(rect["y"]), int(ink_rect["y"])))
             erase_basis["width"] = min(
@@ -2536,7 +2565,7 @@ def patch_ocr_rect_with_glyphs(
         glyph_ink = ink_rect
         if overlay_views_ink:
             probe_font = load_font(max(8, min(72, ink_rect["height"])), "bold")
-            nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font)
+            nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font) + int(overlay_left_nudge_px or 0)
             if nx:
                 glyph_ink = dict(ink_rect)
                 glyph_ink["x"] = ink_rect["x"] + nx
@@ -2552,7 +2581,7 @@ def patch_ocr_rect_with_glyphs(
     glyph_rect = ink_rect
     if overlay_views_ink:
         probe_font = load_font(max(8, min(72, ink_rect["height"])), "bold")
-        nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font)
+        nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font) + int(overlay_left_nudge_px or 0)
         if nx:
             glyph_rect = dict(ink_rect)
             glyph_rect["x"] = ink_rect["x"] + nx
@@ -2585,8 +2614,24 @@ def patch_ocr_rect_with_glyphs(
         cal_font = load_font_by_path(calibration.get("font_path", ""), calibration["font_size"])
         if cal_font is None:
             cal_font = load_font(calibration["font_size"], "bold")
-        nx = _overlay_views_left_nudge_px(original_text, text, font=cal_font)
+        nx = _overlay_views_left_nudge_px(original_text, text, font=cal_font) + int(overlay_left_nudge_px or 0)
         calibration["dx"] = int(calibration.get("dx", 0)) + nx
+        if overlay_left_nudge_px:
+            calibration["overlay_left_nudge_px"] = int(overlay_left_nudge_px)
+        if overlay_anchor_center_y is not None:
+            fp_cal = calibration.get("font_path", "") or ""
+            weight_cal = _weight_from_font_path(str(fp_cal) if fp_cal else None)
+            if _use_red_percent_hybrid(str(text), font=cal_font, font_path_hint=str(fp_cal) if fp_cal else None):
+                bbox = rendered_ink_bbox_red_percent_split(str(text), int(calibration["font_size"]), weight_cal)
+            else:
+                bbox = rendered_ink_bbox(str(text), cal_font)
+            rendered_h = max(1, bbox[3] - bbox[1])
+            current_center_y = float(ink_rect["y"]) + int(calibration.get("dy", 0)) + rendered_h / 2.0
+            center_delta = int(round(float(overlay_anchor_center_y) - current_center_y))
+            center_delta = max(-4, min(4, center_delta))
+            calibration["dy"] = int(calibration.get("dy", 0)) + center_delta
+            calibration["overlay_anchor_center_y"] = float(overlay_anchor_center_y)
+            calibration["overlay_anchor_dy_delta"] = center_delta
     image = draw_text_with_calibration(image, ink_rect, text, style, calibration)
     return image, {
         "mode": "font",
