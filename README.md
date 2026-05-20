@@ -116,8 +116,9 @@ pip install -r requirements-dev.txt
 python build_app.py
 ```
 
-* macOS：产出 `dist/DataPolisher.app`
-* Windows：产出 `dist/DataPolisher/DataPolisher.exe`
+* macOS：产出 `dist/DataPolisher.app`。Finder / Dock 图标默认由构建脚本根据 `data_polisher/static/logo.png` 自动生成 `.icns` 并传给 PyInstaller；若你已放好手工图标，可优先使用 `assets/DataPolisher.icns`（Windows 对应 `assets/DataPolisher.ico`）。
+* Windows：产出 `dist/DataPolisher/DataPolisher.exe`，图标同上（自动生成 `.ico` 或使用 `assets/DataPolisher.ico`）。
+* GUI 主界面侧边栏仅保留「DataPolisher」标题文字，不再嵌入选大图 Logo。
 
 > PaddleOCR / paddlepaddle 体积较大，构建后的安装包通常 800MB 以上，属于正常现象。
 

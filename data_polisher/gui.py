@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import random
 import sys
 import threading
@@ -77,42 +76,6 @@ def _parse_int_range_text(
     return _parse_range_pair(lo_s, hi_s, label, lower_floor=lower_floor)
 
 
-def resolve_logo_path() -> Optional[Path]:
-    """Bundled ``static/logo.png``, or ``DATAPOLISHER_LOGO`` env override."""
-
-    env = (os.environ.get("DATAPOLISHER_LOGO") or "").strip()
-    if env:
-        p = Path(env).expanduser()
-        if p.is_file():
-            return p
-    bundled = Path(__file__).resolve().parent / "static" / "logo.png"
-    if bundled.is_file():
-        return bundled
-    return None
-
-
-def logo_png_path() -> Path:
-    """Default bundled logo path (may not exist)."""
-
-    return Path(__file__).resolve().parent / "static" / "logo.png"
-
-
-def load_sidebar_logo_ctk(max_w: int = 260, max_h: int = 96) -> Optional[ctk.CTkImage]:
-    path = resolve_logo_path()
-    if path is None:
-        return None
-    try:
-        img = Image.open(path).convert("RGBA")
-        w0, h0 = img.size
-        scale = min(max_w / max(w0, 1), max_h / max(h0, 1), 1.0)
-        nw = max(1, int(w0 * scale))
-        nh = max(1, int(h0 * scale))
-        img = img.resize((nw, nh), Image.Resampling.LANCZOS)
-        return ctk.CTkImage(light_image=img, dark_image=img, size=(nw, nh))
-    except Exception:
-        return None
-
-
 def _display_scale(widget) -> float:
     try:
         return max(1.0, widget.winfo_fpixels("1i") / 72.0)
@@ -177,7 +140,6 @@ class DataPolisherApp(ctk.CTk):
 
         self._original_tk: Optional[ImageTk.PhotoImage] = None
         self._result_tk: Optional[ImageTk.PhotoImage] = None
-        self._logo_ctk: Optional[ctk.CTkImage] = None
         self._digit_font_family: Optional[str] = (
             RED_NUMBER_FAMILY if register_red_number_for_gui() else None
         )
@@ -231,19 +193,12 @@ class DataPolisherApp(ctk.CTk):
         inner = ctk.CTkFrame(sidebar, fg_color="transparent", corner_radius=0)
         inner.pack(fill="both", expand=True, padx=18, pady=18)
 
-        try:
-            self._logo_ctk = load_sidebar_logo_ctk()
-        except Exception:
-            self._logo_ctk = None
-        if self._logo_ctk is not None:
-            ctk.CTkLabel(inner, text="", image=self._logo_ctk).pack(anchor="w", pady=(0, 8))
-        else:
-            ctk.CTkLabel(
-                inner,
-                text="DataPolisher",
-                font=ctk.CTkFont(size=20, weight="bold"),
-                text_color="#1e293b",
-            ).pack(anchor="w")
+        ctk.CTkLabel(
+            inner,
+            text="DataPolisher",
+            font=ctk.CTkFont(size=20, weight="bold"),
+            text_color="#1e293b",
+        ).pack(anchor="w")
 
         ctk.CTkLabel(
             inner,

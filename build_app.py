@@ -28,12 +28,17 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 SPEC = ROOT / "DataPolisher.spec"
+LOGO_PNG = ROOT / "data_polisher" / "static" / "logo.png"
+ASSETS_ICNS = ROOT / "assets" / "DataPolisher.icns"
+ASSETS_ICO = ROOT / "assets" / "DataPolisher.ico"
 
 # ---------------------------------------------------------------------------
 # Modules that are never needed at runtime but are often dragged in
@@ -87,6 +92,134 @@ def _apple_vision_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _square_thumbnail_rgba(img, size: int):
+    from PIL import Image
+
+    w, h = img.size
+    side = min(w, h)
+    left = (w - side) // 2
+    top = (h - side) // 2
+    cropped = img.crop((left, top, left + side, top + side))
+    return cropped.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def _write_macos_icns(logo_png: Path, out_icns: Path) -> bool:
+    """Build ``.icns`` using ``iconutil`` (requires macOS)."""
+
+    import shutil
+
+    from PIL import Image
+
+    try:
+        base = Image.open(logo_png).convert("RGBA")
+    except Exception as exc:
+        print(f"WARNING: Cannot open logo for Dock/Finder icon: {exc}", file=sys.stderr)
+        return False
+
+    entries = [
+        ("icon_16x16.png", 16),
+        ("icon_16x16@2x.png", 32),
+        ("icon_32x32.png", 32),
+        ("icon_32x32@2x.png", 64),
+        ("icon_128x128.png", 128),
+        ("icon_128x128@2x.png", 256),
+        ("icon_256x256.png", 256),
+        ("icon_256x256@2x.png", 512),
+        ("icon_512x512.png", 512),
+        ("icon_512x512@2x.png", 1024),
+    ]
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="datapolisher_iconset_"))
+    iconset = tmp_root / "Icon.iconset"
+    try:
+        iconset.mkdir(parents=True)
+        for name, px in entries:
+            _square_thumbnail_rgba(base, px).save(iconset / name, format="PNG")
+        subprocess.run(
+            ["iconutil", "-c", "icns", str(iconset), "-o", str(out_icns)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return out_icns.is_file()
+    except (subprocess.CalledProcessError, OSError) as exc:
+        err = getattr(exc, "stderr", None) or getattr(exc, "stdout", None) or exc
+        print(f"WARNING: iconutil failed ({err}); bundle keeps default icon.", file=sys.stderr)
+        return False
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def _write_windows_ico(logo_png: Path, out_ico: Path) -> bool:
+    from PIL import Image
+
+    try:
+        base = Image.open(logo_png).convert("RGBA")
+    except Exception as exc:
+        print(f"WARNING: Cannot open logo for .exe icon: {exc}", file=sys.stderr)
+        return False
+
+    sizes = [16, 32, 48, 64, 128, 256]
+    rgb_images = []
+    for s in sizes:
+        rgba = _square_thumbnail_rgba(base, s)
+        bg = Image.new("RGB", rgba.size, (255, 255, 255))
+        alpha = rgba.split()[3] if rgba.mode == "RGBA" else None
+        bg.paste(rgba, mask=alpha)
+        rgb_images.append(bg)
+
+    try:
+        rgb_images[0].save(
+            out_ico,
+            format="ICO",
+            sizes=[(im.width, im.height) for im in rgb_images],
+            append_images=rgb_images[1:],
+        )
+        return out_ico.is_file()
+    except Exception as exc:
+        print(f"WARNING: Could not write .ico ({exc})", file=sys.stderr)
+        return False
+
+
+def _prepare_application_icon() -> tuple[Optional[Path], Optional[Path]]:
+    """Return ``(path_for_pyinstaller, temp_file_to_delete)``.
+
+    Prefer ``assets/DataPolisher.icns`` / ``assets/DataPolisher.ico`` when present;
+    otherwise generate from ``data_polisher/static/logo.png``.
+    """
+
+    system = platform.system()
+    cleanup: Optional[Path] = None
+
+    if system == "Darwin":
+        if ASSETS_ICNS.is_file():
+            return ASSETS_ICNS, None
+        if not LOGO_PNG.is_file():
+            return None, None
+        with tempfile.NamedTemporaryFile(suffix=".icns", delete=False) as f:
+            tmp = Path(f.name)
+        cleanup = tmp
+        if _write_macos_icns(LOGO_PNG, tmp):
+            return tmp, cleanup
+        tmp.unlink(missing_ok=True)
+        return None, None
+
+    if system == "Windows":
+        if ASSETS_ICO.is_file():
+            return ASSETS_ICO, None
+        if not LOGO_PNG.is_file():
+            return None, None
+        with tempfile.NamedTemporaryFile(suffix=".ico", delete=False) as f:
+            tmp = Path(f.name)
+        cleanup = tmp
+        if _write_windows_ico(LOGO_PNG, tmp):
+            return tmp, cleanup
+        tmp.unlink(missing_ok=True)
+        return None, None
+
+    return None, None
 
 
 def _pyinstaller_copy_metadata_flags() -> list[str]:
@@ -199,11 +332,21 @@ def main() -> int:
     elif platform.system() == "Windows":
         cmd.append("--noconsole")
 
+    icon_path, icon_cleanup = _prepare_application_icon()
+    if icon_path:
+        cmd.extend(["--icon", str(icon_path)])
+        print("PyInstaller --icon:", icon_path)
+
     # Use a top-level launcher so relative imports inside the package work.
     cmd.append(str(ROOT / "launcher.py"))
 
     print("Running:", " ".join(cmd))
-    rc = subprocess.call(cmd, cwd=ROOT)
+    try:
+        rc = subprocess.call(cmd, cwd=ROOT)
+    finally:
+        if icon_cleanup is not None and icon_cleanup.is_file():
+            icon_cleanup.unlink(missing_ok=True)
+
     if rc != 0:
         return rc
 
