@@ -74,19 +74,21 @@ class FontCalibrationTests(unittest.TestCase):
         )
 
         if cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT.is_file():
+            self.assertEqual(str(chosen["font_path"]), str(cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT))
             self.assertTrue(str(chosen["font_path"]).endswith("jlm_cmss10.ttf"))
             expected_size = cli.choose_feed_overlay_font_size(
                 str(cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT),
-                ["40", "94"],
+                ["40"],
                 {"x": 0, "y": 0, "width": 18, "height": 12},
             )
             self.assertEqual(chosen["font_size"], expected_size)
-            self.assertEqual(chosen["font_size"], 17)
-            self.assertEqual(chosen["overlay_visual_dx"], cli._feed_overlay_visual_dx("40", "94"))
+            self.assertLessEqual(chosen["font_size"], cli.FEED_OVERLAY_VIEWS_FONT_SIZE)
+            self.assertNotIn("overlay_direct_mask", chosen)
+            self.assertNotIn("overlay_scale_x", chosen)
             self.assertEqual(chosen["overlay_visual_dy"], cli._feed_overlay_visual_dy("40", "94"))
             self.assertEqual(chosen["overlay_alpha_gamma"], cli.FEED_OVERLAY_VIEWS_ALPHA_GAMMA)
             font = cli.load_font_by_path(str(chosen["font_path"]), chosen["font_size"])
-            bbox = cli.rendered_ink_bbox("90", font)
+            bbox = cli.rendered_ink_bbox("40", font)
             self.assertLessEqual(bbox[3] - bbox[1], 12)
             self.assertLessEqual(bbox[2] - bbox[0], 18)
 

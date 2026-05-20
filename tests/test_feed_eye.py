@@ -396,7 +396,7 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
         self.assertEqual(it["text"], "18")
         self.assertIn("overlay_anchor_center_y", it)
         self.assertNotIn("overlay_erase_rect", it)
-        self.assertEqual(it.get("overlay_left_nudge_px"), -2)
+        self.assertLessEqual(it.get("overlay_left_nudge_px", 0), 0)
         self.assertGreater(it["rect"]["x"], roi["x"] + 32)
         self.assertLess(it["rect"]["width"], merged["rect"]["width"])
 

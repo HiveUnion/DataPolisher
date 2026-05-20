@@ -31,7 +31,7 @@ from .red_number_fonts import (
 _PKG_STATIC_FONTS = Path(__file__).resolve().parent / "static" / "fonts"
 # DIN ``%`` from 小红书 APK — geometric sans, closer to analytics cards than 苹方.
 BUNDLED_DIN_PERCENT = _PKG_STATIC_FONTS / "DIN-OT-Medium.ttf"
-# 信息流封面左下角小眼睛浏览数：样本比对中 jlm_cmss10 的窄身轻字重更贴近原图。
+# 信息流封面左下角小眼睛浏览数：jlm_cmss10 的窄身轻字重更贴近原图。
 BUNDLED_FEED_OVERLAY_VIEWS_FONT = _PKG_STATIC_FONTS / "jlm_cmss10.ttf"
 FEED_OVERLAY_VIEWS_FONT_SIZE = 17
 FEED_OVERLAY_VIEWS_DX = -2
@@ -914,21 +914,24 @@ def choose_font_size_for_rendered_height(font_path: str, texts, target_height: i
 
 
 def choose_feed_overlay_font_size(font_path: str, texts, ink_rect: Dict[str, int]) -> int:
-    """Fit tiny feed overlay digits by visual height and available slot width."""
+    """Fit tiny feed overlay digits by natural rendered size.
 
-    if Path(font_path) == BUNDLED_FEED_OVERLAY_VIEWS_FONT:
-        return FEED_OVERLAY_VIEWS_FONT_SIZE
+    Callers should pass the source/original digits when replacing text.  That
+    makes the chosen font size a calibration against what is already in the
+    screenshot; the replacement then uses the same natural RED Number size.
+    """
 
     ink_h = max(1, int(ink_rect["height"]))
+    ink_w = max(1, int(ink_rect["width"]))
     if ink_h <= 14:
         # OCR/localized overlay slots include a little antialias halo and nearby
-        # cover texture. Matching the raw slot made the tiny feed digits too big;
-        # the eye0.png gold sample is an 18x12 slot but a ~15x11 visible "40".
+        # cover texture. Prefer the natural RED Number size that best recreates
+        # the old digit slot; replacement digits are rendered at that size.
         target_height = max(8, ink_h - 1)
-        target_width = max(6.0, float(ink_rect["width"]) * 0.9)
+        target_width = max(6.0, float(ink_w))
     else:
         target_height = max(8, int(round(ink_h * 0.94)))
-        target_width = max(6.0, float(ink_rect["width"]) * 1.0)
+        target_width = max(6.0, float(ink_w))
     weight = _weight_from_font_path(font_path)
     best = None
     for size in range(8, min(48, max(12, int(ink_rect["height"]) * 2 + 12)) + 1):
@@ -952,8 +955,14 @@ def choose_feed_overlay_font_size(font_path: str, texts, ink_rect: Dict[str, int
             continue
         med_h = sorted(heights)[len(heights) // 2]
         max_w = max(widths)
-        overflow = max(0.0, max_w - target_width)
-        score = abs(med_h - target_height) * 2.0 + overflow * 2.0 + abs(max_w - target_width) * 0.35
+        width_overflow = max(0.0, max_w - target_width)
+        height_overflow = max(0.0, med_h - target_height)
+        score = (
+            width_overflow * 9.0
+            + height_overflow * 5.0
+            + abs(med_h - target_height) * 1.8
+            + abs(max_w - target_width) * 0.35
+        )
         if best is None or score < best[0]:
             best = (score, size)
     return best[1] if best else target_height
@@ -999,9 +1008,9 @@ def red_number_forced_font_for_standalone_patch(
     texts_for_size = list(dict.fromkeys([ot, nt]))
     if overlay_views_ink:
         if Path(fp) == BUNDLED_FEED_OVERLAY_VIEWS_FONT:
-            font_size = FEED_OVERLAY_VIEWS_FONT_SIZE
+            font_size = choose_feed_overlay_font_size(fp, [ot], ink_rect)
         else:
-            font_size = choose_feed_overlay_font_size(fp, texts_for_size, ink_rect)
+            font_size = choose_feed_overlay_font_size(fp, [ot], ink_rect)
     else:
         font_size = max(
             8,
@@ -1302,6 +1311,79 @@ def extract_light_overlay_text_color(image, rect: Dict[str, int]):
     core = sel[order[:k]]
     mean = core.mean(axis=0)
     return (round(float(mean[0])), round(float(mean[1])), round(float(mean[2])))
+
+
+def extract_light_overlay_ink_style(image, rect: Dict[str, int]):
+    """Estimate color, alpha and edge style for tiny light feed-overlay digits."""
+
+    import numpy as np
+
+    arr = np.array(image.crop(rect_to_box(rect)).convert("RGB"), dtype=np.float32)
+    if arr.size == 0:
+        return None
+
+    pixels = arr.reshape(-1, 3)
+    lum = 0.299 * pixels[:, 0] + 0.587 * pixels[:, 1] + 0.114 * pixels[:, 2]
+    chroma = pixels.max(axis=1) - pixels.min(axis=1)
+
+    bg_cut = float(np.percentile(lum, 55))
+    bg_mask = lum <= bg_cut
+    if int(bg_mask.sum()) < 4:
+        bg_mask = lum <= float(np.percentile(lum, 65))
+    if int(bg_mask.sum()) < 4:
+        return None
+
+    bg_pixels = pixels[bg_mask]
+    background_arr = np.median(bg_pixels, axis=0)
+    background = (
+        int(round(float(background_arr[0]))),
+        int(round(float(background_arr[1]))),
+        int(round(float(background_arr[2]))),
+    )
+    bg_lum = float(np.median(lum[bg_mask]))
+
+    stroke_floor = max(bg_lum + 55.0, float(np.percentile(lum, 75)))
+    stroke_mask = (lum >= stroke_floor) & (chroma <= 90.0)
+    if int(stroke_mask.sum()) < 4:
+        stroke_floor = max(bg_lum + 42.0, float(np.percentile(lum, 70)))
+        stroke_mask = (lum >= stroke_floor) & (chroma <= 105.0)
+    if int(stroke_mask.sum()) < 4:
+        return None
+
+    stroke_lum = lum[stroke_mask]
+    core_cut = float(np.percentile(stroke_lum, 55))
+    core_mask = stroke_mask & (lum >= core_cut)
+    if int(core_mask.sum()) < 4:
+        core_mask = stroke_mask
+    core_pixels = pixels[core_mask]
+    color_arr = np.median(core_pixels, axis=0)
+    color = (
+        int(round(float(color_arr[0]))),
+        int(round(float(color_arr[1]))),
+        int(round(float(color_arr[2]))),
+    )
+    text_lum = max(bg_lum + 1.0, float(np.median(lum[core_mask])))
+
+    alpha_raw = np.clip(((lum - bg_lum) / max(1.0, text_lum - bg_lum)) * 255.0, 0.0, 255.0)
+    valid = stroke_mask & (alpha_raw > 8.0)
+    alpha_values = alpha_raw[valid].astype(int).tolist()
+    if len(alpha_values) < 4:
+        return None
+
+    alpha_arr = alpha_raw[valid]
+    core_count = int((alpha_arr >= 220.0).sum())
+    edge_count = int((alpha_arr < 220.0).sum())
+    total = max(1, core_count + edge_count)
+    area = max(1, int(rect["width"]) * int(rect["height"]))
+
+    return {
+        "color": color,
+        "background": background,
+        "alpha_values": sorted(alpha_values) or [255],
+        "alpha_summary": summarize_values(alpha_values),
+        "edge_ratio": edge_count / total,
+        "density": len(alpha_values) / area,
+    }
 
 
 def extract_ink_style(image, rect: Dict[str, int]):
@@ -2587,11 +2669,13 @@ def patch_ocr_rect_with_glyphs(
             glyph_rect["x"] = ink_rect["x"] + nx
     if not force_red_metrics and render_text_from_glyphs(image, glyph_rect, text, atlas):
         return image, {"mode": "glyph"}
-    style = extract_ink_style(source_image, ink_rect)
     if overlay_views_ink:
+        style = extract_light_overlay_ink_style(source_image, ink_rect) or extract_ink_style(source_image, ink_rect)
         lite = extract_light_overlay_text_color(source_image, ink_rect)
         if lite:
             style["color"] = lite
+    else:
+        style = extract_ink_style(source_image, ink_rect)
     calibration = calibrate_text_render(source_image, image, ink_rect, original_text, style)
     if effective_forced_font:
         calibration["font_size"] = effective_forced_font["font_size"]
@@ -2604,7 +2688,8 @@ def patch_ocr_rect_with_glyphs(
         if "font_match" in effective_forced_font:
             calibration["font_match"] = effective_forced_font["font_match"]
         if overlay_views_ink:
-            calibration["overlay_direct_mask"] = True
+            if effective_forced_font.get("overlay_direct_mask"):
+                calibration["overlay_direct_mask"] = True
             calibration["dx"] = int(effective_forced_font.get("overlay_visual_dx", calibration.get("dx", 0)))
             calibration["dy"] = int(effective_forced_font.get("overlay_visual_dy", calibration.get("dy", 0)))
             calibration["overlay_alpha_gain"] = effective_forced_font.get("overlay_alpha_gain", 1.0)
