@@ -91,6 +91,52 @@ def _has_title_context_below(item: dict, items: list) -> bool:
     return False
 
 
+def _merge_previous_title_lines(item: dict, items: list) -> dict:
+    """Use the top of a multi-line feed title even when the keyword hits a later line."""
+
+    lines = [item]
+    current = item
+    while True:
+        rr = current.get("rect", {})
+        top = int(rr.get("y", 0))
+        best_prev = None
+        best_gap = 10**9
+        for other in items:
+            if other in lines:
+                continue
+            text = str(other.get("text", "")).strip()
+            if not _is_title_like(text):
+                continue
+            orr = other.get("rect", {})
+            bottom = int(orr.get("y", 0) + orr.get("height", 0))
+            gap = top - bottom
+            if gap < -2 or gap > 12:
+                continue
+            if not _horizontally_related(rr, orr):
+                continue
+            if gap < best_gap:
+                best_gap = gap
+                best_prev = other
+        if best_prev is None:
+            break
+        lines.insert(0, best_prev)
+        current = best_prev
+
+    if len(lines) == 1:
+        return item
+
+    rects = [line["rect"] for line in lines]
+    x0 = min(int(r["x"]) for r in rects)
+    y0 = min(int(r["y"]) for r in rects)
+    x1 = max(int(r["x"] + r["width"]) for r in rects)
+    y1 = max(int(r["y"] + r["height"]) for r in rects)
+    merged = dict(item)
+    merged["text"] = "".join(str(line.get("text", "")) for line in lines)
+    merged["rect"] = {"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0}
+    merged["title_block_lines"] = lines
+    return merged
+
+
 def pick_best_title_item(items: list, query: str):
     if not query.strip():
         raise ValueError("标题关键词不能为空")
@@ -101,13 +147,15 @@ def pick_best_title_item(items: list, query: str):
         text = str(item.get("text", ""))
         if not _is_title_like(text):
             continue
-        s = _title_match_score(query, text)
-        title_context_bonus = 0.08 if _has_title_context_below(item, items) else 0.0
+        block = _merge_previous_title_lines(item, items)
+        block_text = str(block.get("text", ""))
+        s = max(_title_match_score(query, text), _title_match_score(query, block_text))
+        title_context_bonus = 0.08 if _has_title_context_below(block, items) else 0.0
         rank = s + title_context_bonus
         if rank > best_rank:
             best_rank = rank
             best_score = s
-            best = item
+            best = block
     if best is None:
         raise RuntimeError("OCR 未识别到可作为标题的文本，请换截图或缩短/改写关键词")
     if best_score < 0.35:
@@ -301,6 +349,29 @@ def _bright_components(mask) -> list[Tuple[int, Tuple[int, int, int, int]]]:
     return comps
 
 
+def _overlay_bright_thresholds(lum) -> List[float]:
+    """Candidate cutoffs for bright overlay ink on translucent capsules."""
+
+    import numpy as np
+
+    bg = float(np.median(lum))
+    base = max(185.0, min(bg + 28.0, 244.0))
+    raw = [
+        base,
+        bg + 18.0,
+        bg + 8.0,
+        bg - 2.0,
+        bg - 10.0,
+        bg - 18.0,
+    ]
+    thresholds: List[float] = []
+    for value in raw:
+        clamped = max(185.0, min(float(value), 248.0))
+        if all(abs(clamped - old) >= 1.0 for old in thresholds):
+            thresholds.append(clamped)
+    return thresholds
+
+
 def _union_boxes(boxes: List[Tuple[int, int, int, int]]) -> Tuple[int, int, int, int]:
     return (
         min(box[0] for box in boxes),
@@ -308,6 +379,16 @@ def _union_boxes(boxes: List[Tuple[int, int, int, int]]) -> Tuple[int, int, int,
         max(box[2] for box in boxes),
         max(box[3] for box in boxes),
     )
+
+
+def _digit_lane_erase_rect(ocr_rect: Dict[str, int], visual_rect: Dict[str, int]) -> Dict[str, int]:
+    """Erase full old digits while preserving the eye icon just to the left."""
+
+    x0 = int(visual_rect["x"])
+    y0 = min(int(ocr_rect["y"]), int(visual_rect["y"]))
+    x1 = max(int(ocr_rect["x"] + ocr_rect["width"]), int(visual_rect["x"] + visual_rect["width"]))
+    y1 = max(int(ocr_rect["y"] + ocr_rect["height"]), int(visual_rect["y"] + visual_rect["height"]))
+    return {"x": x0, "y": y0, "width": max(1, x1 - x0), "height": max(1, y1 - y0)}
 
 
 @lru_cache(maxsize=1)
@@ -454,7 +535,55 @@ def _recognize_overlay_digit_boxes(
     }
 
 
-def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Optional[dict]:
+def _visual_overlay_eye_info_from_roi(image: Image.Image, roi: Dict[str, int]) -> Optional[dict]:
+    """Find the eye icon even when the adjacent tiny digits are too faint to classify."""
+
+    import numpy as np
+
+    compact = dict(roi)
+    compact["width"] = min(int(roi["width"]), 72)
+    crop = image.crop(_roi_tuple(compact)).convert("RGB")
+    arr = np.array(crop)
+    if arr.size == 0:
+        return None
+    lum = arr.mean(axis=2)
+    spread = arr.max(axis=2) - arr.min(axis=2)
+    comps = []
+    for bright_thr in _overlay_bright_thresholds(lum):
+        mask = (lum > bright_thr) & (spread < 80)
+        comps = _bright_components(mask)
+        if comps:
+            break
+    if not comps:
+        return None
+
+    h, w = mask.shape
+    left_limit = max(18, int(w * 0.45))
+    eye_like = []
+    for area, box in comps:
+        x0, y0, x1, y1 = box
+        bw, bh = x1 - x0, y1 - y0
+        if x0 >= left_limit or area < 24 or bw < 6 or bh < 6:
+            continue
+        if y1 > int(h * 0.74) or bw > 30 or bh > 24:
+            continue
+        eye_like.append((area, box))
+    if not eye_like:
+        return None
+
+    _area, eye_box = max(eye_like, key=lambda item: item[0])
+    return {
+        "eye_right": compact["x"] + eye_box[2],
+        "anchor_center_y": compact["y"] + (eye_box[1] + eye_box[3]) / 2.0,
+    }
+
+
+def _visual_overlay_item_from_roi(
+    image: Image.Image,
+    roi: Dict[str, int],
+    *,
+    expected_digit_count: Optional[int] = None,
+) -> Optional[dict]:
     """Fallback when OCR misses a tiny view count: find bright digit strokes after the eye icon."""
 
     import numpy as np
@@ -467,31 +596,32 @@ def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Op
         return None
     lum = arr.mean(axis=2)
     spread = arr.max(axis=2) - arr.min(axis=2)
-    bg = float(np.median(lum))
-    # On pale covers the ROI median can be close to white because most pixels
-    # are outside the gray capsule. Cap the threshold so the white eye/digits
-    # still enter the mask while beige background remains below it.
-    bright_thr = max(185.0, min(bg + 28.0, 244.0))
-    mask = (lum > bright_thr) & (spread < 80)
-
-    comps = _bright_components(mask)
-    if not comps:
+    masks = []
+    for bright_thr in _overlay_bright_thresholds(lum):
+        mask = (lum > bright_thr) & (spread < 80)
+        comps = _bright_components(mask)
+        if comps:
+            masks.append((mask, comps))
+    if not masks:
         return None
 
-    h, w = mask.shape
+    h, w = masks[0][0].shape
     left_limit = max(18, int(w * 0.45))
     eye_like = []
-    for area, box in comps:
-        x0, y0, x1, y1 = box
-        bw, bh = x1 - x0, y1 - y0
-        if x0 >= left_limit or area < 24 or bw < 6 or bh < 6:
-            continue
-        # Bright floor/background details can sit at the bottom of the strip and
-        # are much wider than the eye mark. Treat only compact upper components
-        # as the icon anchor; otherwise digit_min_x jumps past the real digits.
-        if y1 > int(h * 0.74) or bw > 30 or bh > 24:
-            continue
-        eye_like.append((area, box))
+    for _mask, comps in masks:
+        for area, box in comps:
+            x0, y0, x1, y1 = box
+            bw, bh = x1 - x0, y1 - y0
+            if x0 >= left_limit or area < 24 or bw < 6 or bh < 6:
+                continue
+            # Bright floor/background details can sit at the bottom of the strip and
+            # are much wider than the eye mark. Treat only compact upper components
+            # as the icon anchor; otherwise digit_min_x jumps past the real digits.
+            if y1 > int(h * 0.74) or bw > 30 or bh > 24:
+                continue
+            eye_like.append((area, box))
+        if eye_like:
+            break
     eye_right = max((box[2] for _area, box in eye_like), default=max(10, int(w * 0.26)))
     anchor_center_y = None
     if eye_like:
@@ -499,10 +629,34 @@ def _visual_overlay_item_from_roi(image: Image.Image, roi: Dict[str, int]) -> Op
         anchor_center_y = compact["y"] + (eye_box[1] + eye_box[3]) / 2.0
     digit_min_x = eye_right + 3
 
-    recognized = _recognize_overlay_digit_boxes(mask, comps, digit_min_x=digit_min_x)
-    if recognized is None:
+    best = None
+    for mask, comps in masks:
+        recognized = _recognize_overlay_digit_boxes(mask, comps, digit_min_x=digit_min_x)
+        if recognized is None:
+            continue
+        text = str(recognized.get("text", ""))
+        if len(text) > 3:
+            continue
+        digit_len = sum(1 for ch in text if ch.isdigit())
+        bx0, by0, bx1, by1 = recognized["box"]
+        width = bx1 - bx0
+        score = float(recognized.get("score", 0.0))
+        if expected_digit_count is not None:
+            if digit_len == expected_digit_count:
+                score += 0.70
+            else:
+                score -= min(0.55, abs(digit_len - expected_digit_count) * 0.35)
+        if text.startswith("0") and len(text) > 1:
+            score -= 0.18
+        if width > 38:
+            score -= 0.12
+        candidate = (score, recognized, mask)
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    if best is None:
         return None
 
+    _score, recognized, mask = best
     bx0, by0, bx1, by1 = recognized["box"]
     x0 = max(0, bx0 - 1)
     y0 = max(0, by0 - 1)
@@ -536,14 +690,33 @@ def _refine_overlay_item_with_visual_digit(image: Image.Image, roi: Dict[str, in
     digit_count = sum(1 for ch in raw if ch.isdigit())
     width = int(rr.get("width", 0))
     height = max(1, int(rr.get("height", 1)))
-    visual = _visual_overlay_item_from_roi(image, roi)
+    visual = _visual_overlay_item_from_roi(image, roi, expected_digit_count=digit_count)
     if visual is None:
+        eye_info = _visual_overlay_eye_info_from_roi(image, roi)
+        if eye_info is not None and digit_count >= 1:
+            rr_right = int(rr.get("x", 0) + rr.get("width", 0))
+            digit_x = max(int(rr.get("x", 0)), int(round(float(eye_info["eye_right"]) + 5)))
+            if rr_right - digit_x >= max(6, digit_count * 4):
+                digit_rect = {
+                    "x": digit_x,
+                    "y": int(rr.get("y", 0)) + max(1, height // 6),
+                    "width": rr_right - digit_x,
+                    "height": max(8, height - max(2, height // 4)),
+                }
+                refined = dict(item)
+                refined["rect"] = digit_rect
+                refined["text"] = item.get("text", raw)
+                refined["overlay_anchor_center_y"] = eye_info["anchor_center_y"]
+                refined["overlay_visual_score"] = 0.0
+                refined["overlay_erase_rect"] = _digit_lane_erase_rect(rr, digit_rect)
+                return refined
         return item
 
     vr = visual["rect"]
     raw_norm = cli.normalize_metric_text(raw)
     visual_norm = cli.normalize_metric_text(str(visual.get("text", "")))
     same_visual_text = bool(raw_norm and raw_norm == visual_norm)
+    visual_digit_count = sum(1 for ch in visual_norm if ch.isdigit())
     visual_overlaps_ocr = _intersection_area(vr, rr) > 0 or (
         abs((int(vr["x"]) + int(vr["width"]) / 2.0) - (int(rr.get("x", 0)) + width / 2.0))
         <= max(8, width)
@@ -556,6 +729,27 @@ def _refine_overlay_item_with_visual_digit(image: Image.Image, roi: Dict[str, in
         refined = dict(item)
         refined["rect"] = dict(vr)
         refined["text"] = visual.get("text") or item.get("text", raw)
+        # OCR often covers the full old number while the visual box is tighter.
+        # Use OCR for erasing only when it starts in the digit lane, not over
+        # the eye icon; rendering still uses the tighter visual rectangle.
+        if int(rr.get("x", 0)) >= int(roi["x"]) + 28:
+            refined["overlay_erase_rect"] = _digit_lane_erase_rect(rr, vr)
+        if "overlay_anchor_center_y" in visual:
+            refined["overlay_anchor_center_y"] = visual["overlay_anchor_center_y"]
+        if "overlay_visual_score" in visual:
+            refined["overlay_visual_score"] = visual["overlay_visual_score"]
+        return refined
+
+    # OCR sometimes wraps the eye icon and the digits in one wide box. Visual
+    # recognition can misclassify a tiny glyph ("18" -> "19"), but its stroke
+    # bounds are still the right place to erase/render. If the digit count agrees,
+    # keep OCR's text while using the visual geometry.
+    if digit_count >= 2 and visual_digit_count == digit_count and visual_overlaps_ocr:
+        refined = dict(item)
+        refined["rect"] = dict(vr)
+        refined["text"] = item.get("text", raw)
+        if width > int(vr["width"]) + max(8, height // 2):
+            refined["overlay_left_nudge_px"] = -2
         if "overlay_anchor_center_y" in visual:
             refined["overlay_anchor_center_y"] = visual["overlay_anchor_center_y"]
         if "overlay_visual_score" in visual:
@@ -820,6 +1014,9 @@ def beautify_feed_card_eye(
         raw_text=view_item["text"],
         forced_font=None,
         overlay_anchor_center_y=view_item.get("overlay_anchor_center_y"),
+        overlay_left_nudge_px=view_item.get("overlay_left_nudge_px"),
+        overlay_erase_rect=view_item.get("overlay_erase_rect"),
+        overlay_use_input_rect=view_item.get("overlay_visual_score") is not None,
         overlay_views_ink=True,
         overlay_thumb=thumb,
         overlay_strip=strip_roi,

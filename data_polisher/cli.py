@@ -2500,9 +2500,14 @@ def patch_ocr_rect_with_glyphs(
     overlay_thumb: Optional[Dict[str, int]] = None,
     overlay_strip: Optional[Dict[str, int]] = None,
     overlay_anchor_center_y: Optional[float] = None,
+    overlay_left_nudge_px: Optional[int] = None,
+    overlay_use_input_rect: bool = False,
+    overlay_erase_rect: Optional[Dict[str, int]] = None,
 ):
     ink_rect = None
-    if overlay_views_ink:
+    if overlay_views_ink and overlay_use_input_rect:
+        ink_rect = dict(rect)
+    elif overlay_views_ink:
         ink_rect = localize_feed_overlay_views_ink(source_image, rect, raw_text=raw_text)
     if ink_rect is None:
         ink_rect = get_ink_rect(source_image, rect, raw_text=raw_text)
@@ -2538,8 +2543,8 @@ def patch_ocr_rect_with_glyphs(
 
     # Erase old glyphs: overlay uses minimal padding and only removes bright strokes.
     if overlay_views_ink:
-        erase_basis = dict(rect)
-        if ink_rect is not None:
+        erase_basis = dict(overlay_erase_rect) if overlay_erase_rect else dict(rect)
+        if ink_rect is not None and not overlay_erase_rect:
             erase_basis["x"] = max(int(rect["x"]), int(ink_rect["x"]) - 1)
             erase_basis["y"] = max(0, min(int(rect["y"]), int(ink_rect["y"])))
             erase_basis["width"] = min(
@@ -2560,7 +2565,7 @@ def patch_ocr_rect_with_glyphs(
         glyph_ink = ink_rect
         if overlay_views_ink:
             probe_font = load_font(max(8, min(72, ink_rect["height"])), "bold")
-            nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font)
+            nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font) + int(overlay_left_nudge_px or 0)
             if nx:
                 glyph_ink = dict(ink_rect)
                 glyph_ink["x"] = ink_rect["x"] + nx
@@ -2576,7 +2581,7 @@ def patch_ocr_rect_with_glyphs(
     glyph_rect = ink_rect
     if overlay_views_ink:
         probe_font = load_font(max(8, min(72, ink_rect["height"])), "bold")
-        nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font)
+        nx = _overlay_views_left_nudge_px(original_text, text, font=probe_font) + int(overlay_left_nudge_px or 0)
         if nx:
             glyph_rect = dict(ink_rect)
             glyph_rect["x"] = ink_rect["x"] + nx
@@ -2609,8 +2614,10 @@ def patch_ocr_rect_with_glyphs(
         cal_font = load_font_by_path(calibration.get("font_path", ""), calibration["font_size"])
         if cal_font is None:
             cal_font = load_font(calibration["font_size"], "bold")
-        nx = _overlay_views_left_nudge_px(original_text, text, font=cal_font)
+        nx = _overlay_views_left_nudge_px(original_text, text, font=cal_font) + int(overlay_left_nudge_px or 0)
         calibration["dx"] = int(calibration.get("dx", 0)) + nx
+        if overlay_left_nudge_px:
+            calibration["overlay_left_nudge_px"] = int(overlay_left_nudge_px)
         if overlay_anchor_center_y is not None:
             fp_cal = calibration.get("font_path", "") or ""
             weight_cal = _weight_from_font_path(str(fp_cal) if fp_cal else None)
