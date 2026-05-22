@@ -1,7 +1,8 @@
 """Bundled RED Number digit fonts (metrics style aligned with 小红书 data UI).
 
-Fonts ship under ``static/fonts/``. PIL loads files by path; Tk needs OS-level
-registration on macOS / Windows so ``family="RED Number"`` resolves.
+Fonts ship under ``static/fonts/``. PIL loads files by path; native UI
+consumers need OS-level registration on macOS / Windows so
+``family="RED Number"`` resolves.
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ def prefer_red_number_metric_render() -> bool:
 
 @lru_cache(maxsize=1)
 def register_red_number_for_gui() -> bool:
-    """Register bundled fonts with the OS for the current process (Tk / CTk)."""
+    """Register bundled fonts with the OS for the current process."""
 
     paths = [p for p in (RED_NUMBER_REGULAR, RED_NUMBER_MEDIUM, RED_NUMBER_BOLD) if p.is_file()]
     if not paths:
@@ -68,7 +69,7 @@ def register_red_number_for_gui() -> bool:
         return any(_mac_register_font(p) for p in paths)
     if sys.platform == "win32":
         return any(_win_register_font(p) for p in paths)
-    # Linux: PIL loads via file path; Tk generally won't see ``RED_NUMBER_FAMILY`` without fc/font install.
+    # Linux: PIL loads via file path; UI font discovery depends on the user's fontconfig setup.
     return False
 
 

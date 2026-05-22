@@ -21,11 +21,6 @@ if [[ ! -x "$PY" ]]; then
   exit 1
 fi
 
-if ! "$PY" -c "import tkinter as _tk; r=_tk.Tk(); r.destroy()" 2>/dev/null; then
-  echo "ERROR: Tkinter does not start with $PY — install python-tk via Homebrew."
-  exit 1
-fi
-
 VENV="${ROOT}/.venv-${BUILD_MAC_VENV_TAG}"
 if [[ ! -d "$VENV" ]] || [[ "${REBUILD_VENV:-}" == "1" ]]; then
   rm -rf "$VENV"
@@ -38,7 +33,7 @@ python -m pip install -q -U pip wheel
 python -m pip install -q "pyinstaller>=6.0" \
   pillow opencv-python-headless "numpy>=1.26" \
   "paddlepaddle>=3.0" "paddleocr>=3.0" appdirs
-# GUI 依赖 customtkinter（见 pyproject.toml）；否则 PyInstaller 分析 launcher → gui 时报错
+# GUI 依赖 pywebview（见 pyproject.toml）；安装 editable 包时一并拉取。
 python -m pip install -q -e "$ROOT"
 
 echo "Running build_app.py with $(python -V) ($(uname -m)) …"

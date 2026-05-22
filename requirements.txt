@@ -4,6 +4,7 @@ opencv-python-headless>=4.7
 numpy>=1.26
 paddlepaddle>=3.0
 paddleocr>=3.0
+pywebview>=5.0
 
 # macOS only: OS-native Vision.framework OCR backend.
 # When present, build_app.py skips bundling PaddlePaddle/PaddleOCR (saves 300-600 MB).

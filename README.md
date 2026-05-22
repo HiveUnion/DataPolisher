@@ -23,7 +23,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# 启动 GUI
+# 启动桌面界面（内嵌 WebView）
 PYTHONPATH=. python -m data_polisher
 
 # 或者 CLI
@@ -118,7 +118,7 @@ python build_app.py
 
 * macOS：产出 `dist/DataPolisher.app`。Finder / Dock 图标默认由构建脚本根据 `data_polisher/static/logo.png` 自动生成 `.icns` 并传给 PyInstaller；若你已放好手工图标，可优先使用 `assets/DataPolisher.icns`（Windows 对应 `assets/DataPolisher.ico`）。
 * Windows：产出 `dist/DataPolisher/DataPolisher.exe`，图标同上（自动生成 `.ico` 或使用 `assets/DataPolisher.ico`）。
-* GUI 主界面侧边栏仅保留「DataPolisher」标题文字，不再嵌入选大图 Logo。
+* 桌面界面使用 pywebview 承载内嵌 Web 页面，不再依赖 Tcl/Tk 或 customtkinter。
 
 > PaddleOCR / paddlepaddle 体积较大，构建后的安装包通常 800MB 以上，属于正常现象。
 
@@ -153,7 +153,9 @@ DataPolisher/
 │   ├── ocr.py            # PaddleOCR 适配
 │   ├── template.py       # 模板坐标兜底
 │   ├── cli.py            # 命令行 + 自校准 + row atlas 主流程
-│   ├── gui.py            # Tkinter GUI
+│   ├── gui.py            # 兼容入口，转发到 WebView GUI
+│   ├── web_gui.py        # pywebview 后端桥接
+│   ├── static_web/       # 内嵌 Web 页面
 │   └── __main__.py       # python -m data_polisher 入口
 ├── tests/test_core.py    # 单元测试
 ├── requirements.txt      # 运行依赖

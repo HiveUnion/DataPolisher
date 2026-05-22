@@ -4,8 +4,7 @@
 # Run this on an Intel Mac (or from a Rosetta shell with x86_64 Homebrew + python@3.12).
 # Apple Silicon 默认请用 build_mac_arm64_app.sh。
 #
-# Apple’s Xcode-bundled Python links against a Tk that may abort on recent macOS;
-# Homebrew python@3.12 ships a working Tcl/Tk — use it for GUI + PyInstaller.
+# Homebrew python@3.12 is used for a repeatable PyInstaller build environment.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

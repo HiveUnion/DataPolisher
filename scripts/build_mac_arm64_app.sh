@@ -3,10 +3,7 @@
 #
 # Intel Mac 请使用 scripts/build_mac_intel_app.sh（需在 x86_64 环境构建）。
 #
-# Apple’s Xcode-bundled Python 3.9 links against a Tk that aborts on recent
-# macOS (e.g. 26.x) with:
-#   macOS 26 (2602) or later required, have instead 16 (1602) !
-# Homebrew python@3.12 ships a working Tcl/Tk — use it for GUI + PyInstaller.
+# Homebrew python@3.12 is used for a repeatable PyInstaller build environment.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
