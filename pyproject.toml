@@ -14,7 +14,7 @@ dependencies = [
   "numpy>=1.26",
   "paddlepaddle>=3.0",
   "paddleocr>=3.0",
-  "customtkinter>=5.2",
+  "pywebview>=5.0",
 ]
 
 [project.scripts]
@@ -29,6 +29,7 @@ packages = ["data_polisher"]
 [tool.setuptools.package-data]
 data_polisher = [
   "static/*",
+  "static_web/*",
   "static/fonts/REDNumber-Regular.ttf",
   "static/fonts/REDNumber-Medium.ttf",
   "static/fonts/REDNumber-Bold.otf",

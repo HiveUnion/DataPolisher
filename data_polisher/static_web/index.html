@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DataPolisher</title>
+    <link rel="stylesheet" href="./app.css" />
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <img src="../static/logo.png" alt="" />
+          <div>
+            <h1>DataPolisher</h1>
+            <p>截图数据批量美化</p>
+          </div>
+        </header>
+
+        <div class="segment" role="tablist" aria-label="处理模式">
+          <button class="segment-button is-active" type="button" data-mode="detail">详细数据</button>
+          <button class="segment-button" type="button" data-mode="eye">小眼睛</button>
+        </div>
+
+        <section class="mode-panel" id="detail-panel" data-panel="detail">
+          <div class="field-group">
+            <label for="exposure-lo">新曝光数</label>
+            <div class="range-row">
+              <input id="exposure-lo" type="number" min="1" value="900" inputmode="numeric" />
+              <span>至</span>
+              <input id="exposure-hi" type="number" min="1" value="1100" inputmode="numeric" />
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="views-lo">新观看数</label>
+            <div class="range-row">
+              <input id="views-lo" type="number" min="0" value="250" inputmode="numeric" />
+              <span>至</span>
+              <input id="views-hi" type="number" min="0" value="350" inputmode="numeric" />
+            </div>
+          </div>
+        </section>
+
+        <section class="mode-panel is-hidden" id="eye-panel" data-panel="eye">
+          <div class="field-group">
+            <label for="eye-title">标题关键词</label>
+            <input id="eye-title" type="text" autocomplete="off" />
+          </div>
+
+          <div class="field-group">
+            <label for="eye-views-lo">浏览量随机范围</label>
+            <div class="range-row">
+              <input id="eye-views-lo" type="number" min="0" value="80" inputmode="numeric" />
+              <span>至</span>
+              <input id="eye-views-hi" type="number" min="0" value="120" inputmode="numeric" />
+            </div>
+          </div>
+        </section>
+
+        <div class="primary-actions">
+          <button class="button button-primary" type="button" id="add-files">添加图片</button>
+          <button class="button button-success" type="button" id="start-all">全部开始</button>
+          <button class="button button-muted" type="button" id="clear-tasks">清空列表</button>
+        </div>
+
+        <div class="summary" id="summary">任务列表为空</div>
+      </aside>
+
+      <main class="workspace">
+        <section class="task-panel">
+          <div class="panel-header">
+            <h2>任务列表</h2>
+            <div class="inline-actions">
+              <button type="button" id="save-selected">保存选中结果</button>
+              <button type="button" id="batch-save">批量保存完成项</button>
+              <button type="button" id="remove-selected">移除选中</button>
+            </div>
+          </div>
+
+          <div class="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th>文件</th>
+                  <th>模式</th>
+                  <th>状态</th>
+                  <th>进度</th>
+                </tr>
+              </thead>
+              <tbody id="task-body">
+                <tr class="empty-row">
+                  <td colspan="4">暂无任务</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="preview-panel">
+          <div class="panel-header">
+            <h2>预览</h2>
+            <span id="selected-name">未选择</span>
+          </div>
+
+          <div class="preview-grid">
+            <figure class="preview-frame">
+              <figcaption>原图</figcaption>
+              <div class="image-stage" id="original-stage">
+                <span>暂无</span>
+              </div>
+            </figure>
+
+            <figure class="preview-frame">
+              <figcaption>美化结果</figcaption>
+              <div class="image-stage" id="result-stage">
+                <span>暂无</span>
+              </div>
+            </figure>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

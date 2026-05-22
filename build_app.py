@@ -288,10 +288,11 @@ def main() -> int:
         "--noconfirm",
         "--clean",
         "--name=DataPolisher",
-        "--hidden-import=PIL._tkinter_finder",
         "--hidden-import=appdirs",
         "--collect-submodules=data_polisher",
         "--collect-data=data_polisher",
+        "--collect-submodules=webview",
+        "--collect-data=webview",
         # Always ship Paddle — Vision may fail inside a frozen .app on some machines,
         # and slim Vision-only bundles surface misleading “PaddleOCR missing” errors.
         "--collect-all=paddleocr",
