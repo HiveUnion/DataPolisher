@@ -28,6 +28,9 @@ _RUNNING = "running"
 _DONE = "done"
 _FAILED = "failed"
 
+_IMAGE_FILE_TYPES = ("Images (*.jpg;*.jpeg;*.png)",)
+_SAVE_FILE_TYPES = ("JPEG (*.jpg;*.jpeg)", "PNG (*.png)")
+
 
 def _parse_range_pair(
     lo_raw: str,
@@ -95,15 +98,20 @@ class DataPolisherWebApi:
     def select_images(self) -> Dict[str, object]:
         if self.window is None or self.webview is None:
             return {"ok": False, "error": "窗口尚未就绪"}
-        paths = self.window.create_file_dialog(
-            self.webview.OPEN_DIALOG,
-            allow_multiple=True,
-            file_types=("图片 (*.jpg;*.jpeg;*.png)", "所有文件 (*.*)"),
-        )
+        try:
+            paths = self.window.create_file_dialog(
+                self.webview.FileDialog.OPEN,
+                allow_multiple=True,
+                file_types=_IMAGE_FILE_TYPES,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"打开文件选择器失败：{exc}"}
         if not paths:
             return {"ok": True, "files": []}
         files = []
         for raw in paths:
+            if not raw:
+                continue
             path = Path(raw)
             if not path.is_file():
                 continue
@@ -153,11 +161,14 @@ class DataPolisherWebApi:
             return {"ok": False, "error": "窗口尚未就绪"}
 
         suggested = f"{task.path.stem}-polished.jpg"
-        target = self.window.create_file_dialog(
-            self.webview.SAVE_DIALOG,
-            save_filename=suggested,
-            file_types=("JPEG (*.jpg;*.jpeg)", "PNG (*.png)"),
-        )
+        try:
+            target = self.window.create_file_dialog(
+                self.webview.FileDialog.SAVE,
+                save_filename=suggested,
+                file_types=_SAVE_FILE_TYPES,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"打开保存对话框失败：{exc}"}
         out = self._first_dialog_path(target)
         if out is None:
             return {"ok": True, "cancelled": True}
@@ -179,7 +190,10 @@ class DataPolisherWebApi:
     def batch_save(self, task_ids: List[str]) -> Dict[str, object]:
         if self.window is None or self.webview is None:
             return {"ok": False, "error": "窗口尚未就绪"}
-        folder_raw = self.window.create_file_dialog(self.webview.FOLDER_DIALOG)
+        try:
+            folder_raw = self.window.create_file_dialog(self.webview.FileDialog.FOLDER)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"打开文件夹选择器失败：{exc}"}
         folder = self._first_dialog_path(folder_raw)
         if folder is None:
             return {"ok": True, "cancelled": True}
@@ -402,6 +416,8 @@ class DataPolisherWebApi:
             if not value:
                 return None
             value = value[0]
+        if not value:
+            return None
         return Path(str(value))
 
     def _emit(self, payload: Dict[str, object]) -> None:
