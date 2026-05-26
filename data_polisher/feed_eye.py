@@ -54,6 +54,12 @@ def _title_match_score(query: str, candidate: str) -> float:
         if hits:
             longest = max(len(part) for part in hits)
             return 0.82 + min(0.16, longest / max(len(t), 1) * 0.45)
+    if _has_cjk(q):
+        q_chars = {c for c in q if "\u4e00" <= c <= "\u9fff"}
+        if len(q_chars) >= 2:
+            overlap = len(q_chars & {c for c in t if "\u4e00" <= c <= "\u9fff"}) / len(q_chars)
+            if overlap >= 0.5:
+                return 0.36 + min(0.2, overlap * 0.22)
     return float(difflib.SequenceMatcher(None, q, t).ratio())
 
 
@@ -108,6 +114,10 @@ def _merge_previous_title_lines(item: dict, items: list) -> dict:
             if not _is_title_like(text):
                 continue
             orr = other.get("rect", {})
+            curr_h = max(1, int(rr.get("height", 0)))
+            other_h = max(1, int(orr.get("height", 0)))
+            if other_h > max(curr_h + 18, int(round(curr_h * 1.7))):
+                continue
             bottom = int(orr.get("y", 0) + orr.get("height", 0))
             gap = top - bottom
             if gap < -2 or gap > 12:
@@ -485,6 +495,7 @@ def _recognize_overlay_digit_boxes(
     comps: List[Tuple[int, Tuple[int, int, int, int]]],
     *,
     digit_min_x: int,
+    digit_center_y: Optional[float] = None,
 ) -> Optional[dict]:
     h, w = mask.shape
     digit_comps: List[Tuple[int, Tuple[int, int, int, int]]] = []
@@ -497,6 +508,11 @@ def _recognize_overlay_digit_boxes(
             continue
         if y0 > int(h * 0.76):
             continue
+        if digit_center_y is not None:
+            center_y = (y0 + y1) / 2.0
+            max_center_delta = max(5.0, h * 0.22)
+            if abs(center_y - float(digit_center_y)) > max_center_delta:
+                continue
         if bh < 5 or bw > 18 or area > 110:
             continue
         if bh <= 2 and bw >= 6:
@@ -509,9 +525,10 @@ def _recognize_overlay_digit_boxes(
 
     keep: List[Tuple[int, int, int, int]] = [digit_comps[0][1]]
     last = keep[-1]
+    max_digit_gap = max(4, int(round(h * 0.16)))
     for _area, box in digit_comps[1:]:
         gap = box[0] - last[2]
-        if gap > 4:
+        if gap > max_digit_gap:
             break
         if box[2] - keep[0][0] > 48:
             break
@@ -624,14 +641,21 @@ def _visual_overlay_item_from_roi(
             break
     eye_right = max((box[2] for _area, box in eye_like), default=max(10, int(w * 0.26)))
     anchor_center_y = None
+    digit_center_y = None
     if eye_like:
         _area, eye_box = max(eye_like, key=lambda item: item[0])
-        anchor_center_y = compact["y"] + (eye_box[1] + eye_box[3]) / 2.0
+        digit_center_y = (eye_box[1] + eye_box[3]) / 2.0
+        anchor_center_y = compact["y"] + digit_center_y
     digit_min_x = eye_right + 3
 
     best = None
     for mask, comps in masks:
-        recognized = _recognize_overlay_digit_boxes(mask, comps, digit_min_x=digit_min_x)
+        recognized = _recognize_overlay_digit_boxes(
+            mask,
+            comps,
+            digit_min_x=digit_min_x,
+            digit_center_y=digit_center_y,
+        )
         if recognized is None:
             continue
         text = str(recognized.get("text", ""))
@@ -644,6 +668,10 @@ def _visual_overlay_item_from_roi(
         if expected_digit_count is not None:
             if digit_len == expected_digit_count:
                 score += 0.70
+                if (by1 - by0) < max(7, int(round(h * 0.20))):
+                    score -= 0.65
+                if width < max(6, expected_digit_count * 4):
+                    score -= 0.35
             else:
                 score -= min(0.55, abs(digit_len - expected_digit_count) * 0.35)
         else:

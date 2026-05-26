@@ -31,8 +31,8 @@ from .red_number_fonts import (
 _PKG_STATIC_FONTS = Path(__file__).resolve().parent / "static" / "fonts"
 # DIN ``%`` from 小红书 APK — geometric sans, closer to analytics cards than 苹方.
 BUNDLED_DIN_PERCENT = _PKG_STATIC_FONTS / "DIN-OT-Medium.ttf"
-# 信息流封面左下角小眼睛浏览数：jlm_cmss10 的窄身轻字重更贴近原图。
-BUNDLED_FEED_OVERLAY_VIEWS_FONT = _PKG_STATIC_FONTS / "jlm_cmss10.ttf"
+# 信息流封面左下角小眼睛浏览数：使用小红书运行时下发的 FZYouHS 508R。
+BUNDLED_FEED_OVERLAY_VIEWS_FONT = _PKG_STATIC_FONTS / "FZYouHS-508R.ttf"
 FEED_OVERLAY_VIEWS_FONT_SIZE = 17
 FEED_OVERLAY_VIEWS_DX = -2
 FEED_OVERLAY_VIEWS_DY = 1
@@ -343,12 +343,13 @@ def inpaint_overlay_views_stroke_fill(image, source_image, rect: Dict[str, int])
             comp_w = max(xs) - min(xs) + 1
             comp_h = max(ys) - min(ys) + 1
             comp_area = len(pts)
-            touches_top_right = min(ys) == 0 and max(xs) >= mw - 2
+            touches_right_edge = max(xs) >= mw - 2
+            touches_vertical_edge = min(ys) <= 1 or max(ys) >= mh - 2
             too_wide = comp_w > max(12, int(round(mw * 0.72)))
             too_tall = comp_h > max(12, int(round(mh * 0.88)))
             if too_wide or too_tall:
                 continue
-            if touches_top_right and comp_area > max(4, int(round(mw * mh * 0.08))):
+            if touches_right_edge and touches_vertical_edge:
                 continue
             plausible.append(pts)
         kept = plausible or sorted(components, key=len, reverse=True)[: max(1, min(4, len(components)))]
@@ -359,9 +360,12 @@ def inpaint_overlay_views_stroke_fill(image, source_image, rect: Dict[str, int])
         mask = clean_mask
 
     ys, xs = np.where(mask)
+    stroke_bounds = None
+    stroke_mask_for_inpaint = mask.copy()
     if xs.size:
-        pad_x = 2 if mw > 14 else 1
-        pad_y = 1
+        stroke_bounds = (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+        pad_x = 3 if mw > 18 else (2 if mw > 14 else 1)
+        pad_y = 2 if mh >= 14 else 1
         bx0 = max(0, int(xs.min()) - pad_x)
         bx1 = min(mw - 1, int(xs.max()) + pad_x)
         by0 = max(0, int(ys.min()) - pad_y)
@@ -372,6 +376,29 @@ def inpaint_overlay_views_stroke_fill(image, source_image, rect: Dict[str, int])
             envelope = np.zeros(mask.shape, dtype=bool)
             envelope[by0 : by1 + 1, bx0 : bx1 + 1] = True
             mask = envelope
+
+    if stroke_bounds is not None and min(mw, mh) <= 26:
+        # For tiny feed-overlay digits, diffusion from the same crop can pull
+        # the old anti-aliased edge back into the fill. Inpaint the dilated
+        # stroke mask directly, not a bounding rectangle, so capsule corners
+        # and edge highlights outside the glyph strokes are preserved.
+        try:
+            import cv2
+
+            filter_size = 5 if min(mw, mh) <= 22 else 7
+            local_mask_img = Image.fromarray(
+                (stroke_mask_for_inpaint.astype(np.uint8) * 255), mode="L"
+            ).filter(ImageFilter.MaxFilter(filter_size))
+            local_mask = np.asarray(local_mask_img, dtype=np.uint8)
+            if int((local_mask > 0).sum()) >= 2:
+                source_arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
+                cv_mask = np.zeros((ih, iw), dtype=np.uint8)
+                cv_mask[y0:y1, x0:x1] = local_mask
+                bgr = cv2.cvtColor(source_arr, cv2.COLOR_RGB2BGR)
+                repaired = cv2.inpaint(bgr, cv_mask, 2, cv2.INPAINT_TELEA)
+                return Image.fromarray(cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB))
+        except Exception:
+            pass
 
     if min(mw, mh) <= 14:
         max_filter_size, blur_radius = 3, 1.2
@@ -948,15 +975,26 @@ def choose_feed_overlay_font_size(font_path: str, texts, ink_rect: Dict[str, int
 
     ink_h = max(1, int(ink_rect["height"]))
     ink_w = max(1, int(ink_rect["width"]))
+    text_list = [str(text) for text in texts]
+    est_digit_count = max(1, max((sum(1 for ch in text if ch.isdigit()) for text in text_list), default=1))
     if ink_h <= 14:
         # OCR/localized overlay slots include a little antialias halo and nearby
         # cover texture. Prefer the natural RED Number size that best recreates
         # the old digit slot; replacement digits are rendered at that size.
         target_height = max(8, ink_h - 1)
         target_width = max(6.0, float(ink_w))
+        original_digits = "".join(ch for ch in text_list[0] if ch.isdigit()) if text_list else ""
+        replacement_digits = "".join(ch for ch in text_list[-1] if ch.isdigit()) if text_list else ""
+        if original_digits and set(original_digits) <= {"1"} and set(replacement_digits) - {"1"}:
+            target_width = max(target_width, est_digit_count * target_height * 0.72)
     else:
-        target_height = max(8, int(round(ink_h * 0.94)))
-        target_width = max(6.0, float(ink_w))
+        # PaddleOCR can return a loose rectangle that covers the translucent
+        # capsule/background, not just the tiny white strokes. When the visual
+        # localizer cannot tighten it, sizing directly to that outer box makes
+        # two-digit counts look inflated. Use a conservative per-digit slot
+        # estimate for larger overlay boxes.
+        target_height = max(8, int(round(ink_h * 0.66)))
+        target_width = max(6.0, min(float(ink_w), est_digit_count * target_height * 0.72))
     weight = _weight_from_font_path(font_path)
     best = None
     for size in range(8, min(48, max(12, int(ink_rect["height"]) * 2 + 12)) + 1):
@@ -965,8 +1003,7 @@ def choose_feed_overlay_font_size(font_path: str, texts, ink_rect: Dict[str, int
             font = load_font(size, "medium")
         heights = []
         widths = []
-        for text in texts:
-            ts = str(text)
+        for ts in text_list:
             if "%" in ts and _use_red_percent_hybrid(ts, font_path_hint=str(font_path), font=font):
                 bbox = rendered_ink_bbox_red_percent_split(ts, size, weight)
             else:
@@ -1032,10 +1069,7 @@ def red_number_forced_font_for_standalone_patch(
     target_h = max(8, int(ink_rect["height"]))
     texts_for_size = list(dict.fromkeys([ot, nt]))
     if overlay_views_ink:
-        if Path(fp) == BUNDLED_FEED_OVERLAY_VIEWS_FONT:
-            font_size = choose_feed_overlay_font_size(fp, [ot], ink_rect)
-        else:
-            font_size = choose_feed_overlay_font_size(fp, [ot], ink_rect)
+        font_size = choose_feed_overlay_font_size(fp, texts_for_size, ink_rect)
     else:
         font_size = max(
             8,
@@ -1803,6 +1837,13 @@ def draw_text_with_calibration(image, ink_rect: Dict[str, int], text: str, style
         bbox = rendered_ink_bbox(text, font)
     if "overlay_font_origin" in calibration:
         position = tuple(calibration["overlay_font_origin"])
+        old_bbox = calibration.get("overlay_origin_bbox")
+        if old_bbox is not None and len(old_bbox) >= 2:
+            # Keep the replacement's visible left edge in the same slot.  Tiny
+            # overlay digits expose one-pixel left-bearing differences clearly,
+            # especially when replacing a leading ``1`` with a wider digit.
+            position = (position[0] + int(old_bbox[0]) - int(bbox[0]), position[1])
+        calibration["overlay_new_font_origin"] = position
     else:
         position = (
             ink_rect["x"] + calibration["dx"] - bbox[0],
@@ -2756,7 +2797,12 @@ def patch_ocr_rect_with_glyphs(
                 image_size["height"] - erase_basis["y"],
                 max(int(rect["height"]) + 2, int(ink_rect["height"])),
             )
-        padded = expand_rect(erase_basis, 2, image_size)
+        erase_pad = 2
+        if overlay_strip is not None and int(erase_basis.get("x", 0)) >= int(overlay_strip.get("x", 0)) + 28:
+            erase_pad = 3
+        elif int(erase_basis.get("width", 0)) >= 14:
+            erase_pad = 3
+        padded = expand_rect(erase_basis, erase_pad, image_size)
         image = inpaint_overlay_views_stroke_fill(image, source_image, padded)
     else:
         padded = expand_rect(ink_rect, max(2, ink_rect["height"] // 5), image_size)
