@@ -34,5 +34,6 @@ data_polisher = [
   "static/fonts/REDNumber-Medium.ttf",
   "static/fonts/REDNumber-Bold.otf",
   "static/fonts/DIN-OT-Medium.ttf",
+  "static/fonts/FZYouHS-508R.ttf",
   "static/fonts/jlm_cmss10.ttf",
 ]

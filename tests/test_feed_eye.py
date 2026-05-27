@@ -55,6 +55,54 @@ class FeedEyeTitlePickTests(unittest.TestCase):
         self.assertEqual(best["rect"]["y"], 660)
         self.assertGreater(score, 0.9)
 
+    def test_short_cjk_query_tolerates_one_ocr_missed_character(self):
+        items = [
+            {"text": "成都", "rect": {"x": 344, "y": 954, "width": 101, "height": 56}},
+            {"text": "三城漫游|赴河，烟", "rect": {"x": 287, "y": 1018, "width": 224, "height": 21}},
+        ]
+
+        best, score = feed_eye.pick_best_title_item(items, "山河")
+
+        self.assertEqual(best["text"], "三城漫游|赴河，烟")
+        self.assertGreater(score, 0.35)
+
+    def test_duplicate_cover_and_feed_title_candidates_try_lower_first(self):
+        items = [
+            {"text": "AI客服体验", "rect": {"x": 302, "y": 717, "width": 172, "height": 34}},
+            {"text": "升级，声网", "rect": {"x": 301, "y": 760, "width": 163, "height": 37}},
+            {"text": "助力服务提效", "rect": {"x": 304, "y": 805, "width": 190, "height": 31}},
+            {"text": "AI客服体验升级，声网助", "rect": {"x": 286, "y": 967, "width": 226, "height": 22}},
+            {"text": "力服务提效", "rect": {"x": 287, "y": 994, "width": 103, "height": 23}},
+        ]
+
+        candidates = feed_eye.pick_title_candidates_for_eye(items, "声网", (540, 1200))
+
+        self.assertGreaterEqual(len(candidates), 2)
+        self.assertEqual(candidates[0][0]["rect"]["y"], 967)
+        self.assertIn("声网", candidates[0][0]["text"])
+        self.assertEqual(candidates[1][0]["rect"]["y"], 717)
+
+    def test_title_candidate_lookup_falls_back_to_upper_when_lower_has_no_eye(self):
+        img = Image.new("RGB", (540, 1200), color=(255, 255, 255))
+        lower = {"text": "下方声网标题", "rect": {"x": 286, "y": 967, "width": 220, "height": 24}}
+        upper = {"text": "封面声网标题", "rect": {"x": 302, "y": 717, "width": 170, "height": 80}}
+        view_item = {"text": "23", "rect": {"x": 320, "y": 916, "width": 20, "height": 14}}
+
+        with patch(
+            "data_polisher.feed_eye.find_card_eye_number_item",
+            side_effect=[RuntimeError("miss"), view_item],
+        ) as mocked:
+            title, found = feed_eye.find_eye_number_with_title_candidates(
+                img,
+                [],
+                [(lower, 1.0), (upper, 0.98)],
+            )
+
+        self.assertIs(title, upper)
+        self.assertEqual(found, view_item)
+        self.assertIs(mocked.call_args_list[0].args[2], lower)
+        self.assertIs(mocked.call_args_list[1].args[2], upper)
+
     def test_raises_when_no_title_candidate(self):
         items = [{"text": "123", "rect": {"x": 0, "y": 0, "width": 1, "height": 1}}]
         with self.assertRaises(RuntimeError):
@@ -366,6 +414,34 @@ class FeedEyeThumbnailOverlayTests(unittest.TestCase):
         self.assertIn("overlay_erase_rect", it)
         self.assertGreaterEqual(it["rect"]["y"], roi["y"] + 4)
         self.assertLess(it["rect"]["height"], ocr_item["rect"]["height"])
+
+    def test_visual_fallback_ignores_bright_decoration_above_digit_lane(self):
+        title = {"text": "本地人私藏不踩雷", "rect": {"x": 286, "y": 1005, "width": 216, "height": 48}}
+        thumb = feed_eye._infer_thumbnail_rect(title, 540, 1200)
+        roi = feed_eye._overlay_strip_roi(thumb)
+        img = Image.new("RGB", (540, 1200), color=(245, 245, 245))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle(
+            (thumb["x"], thumb["y"], thumb["x"] + thumb["width"], thumb["y"] + thumb["height"]),
+            fill=(74, 88, 96),
+        )
+        draw.rounded_rectangle(
+            (roi["x"] + 8, roi["y"] + 8, roi["x"] + 70, roi["y"] + 31),
+            radius=12,
+            fill=(128, 138, 144),
+        )
+        draw.ellipse((roi["x"] + 14, roi["y"] + 14, roi["x"] + 31, roi["y"] + 24), fill=(248, 248, 248))
+        draw.ellipse((roi["x"] + 20, roi["y"] + 17, roi["x"] + 25, roi["y"] + 22), fill=(128, 138, 144))
+        font = cli.load_font_by_path(str(cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT), 17)
+        draw.text((roi["x"] + 37, roi["y"] + 9), "16", fill=(255, 255, 255), font=font)
+        draw.rectangle((roi["x"] + 58, roi["y"] + 2, roi["x"] + 70, roi["y"] + 12), fill=(248, 248, 248))
+
+        it = feed_eye._visual_overlay_item_from_roi(img, roi)
+
+        self.assertIsNotNone(it)
+        self.assertEqual(it["text"], "16")
+        self.assertLess(it["rect"]["height"], 18)
+        self.assertLess(it["rect"]["width"], 24)
 
     def test_refines_two_digit_ocr_box_that_includes_eye_icon(self):
         title = {"text": "我没办法了。。失眠。失", "rect": {"x": 286, "y": 660, "width": 220, "height": 21}}

@@ -54,6 +54,12 @@ def _title_match_score(query: str, candidate: str) -> float:
         if hits:
             longest = max(len(part) for part in hits)
             return 0.82 + min(0.16, longest / max(len(t), 1) * 0.45)
+    if _has_cjk(q):
+        q_chars = {c for c in q if "\u4e00" <= c <= "\u9fff"}
+        if len(q_chars) >= 2:
+            overlap = len(q_chars & {c for c in t if "\u4e00" <= c <= "\u9fff"}) / len(q_chars)
+            if overlap >= 0.5:
+                return 0.36 + min(0.2, overlap * 0.22)
     return float(difflib.SequenceMatcher(None, q, t).ratio())
 
 
@@ -108,6 +114,10 @@ def _merge_previous_title_lines(item: dict, items: list) -> dict:
             if not _is_title_like(text):
                 continue
             orr = other.get("rect", {})
+            curr_h = max(1, int(rr.get("height", 0)))
+            other_h = max(1, int(orr.get("height", 0)))
+            if other_h > max(curr_h + 18, int(round(curr_h * 1.7))):
+                continue
             bottom = int(orr.get("y", 0) + orr.get("height", 0))
             gap = top - bottom
             if gap < -2 or gap > 12:
@@ -163,6 +173,135 @@ def pick_best_title_item(items: list, query: str):
             f"标题匹配度过低（{best_score:.2f}），最接近的 OCR 文本是：{best['text']!r}"
         )
     return best, best_score
+
+
+def _scored_title_candidates(items: list, query: str) -> list[dict]:
+    if not query.strip():
+        raise ValueError("标题关键词不能为空")
+
+    candidates: list[dict] = []
+    for idx, item in enumerate(items):
+        text = str(item.get("text", ""))
+        if not _is_title_like(text):
+            continue
+        block = _merge_previous_title_lines(item, items)
+        block_text = str(block.get("text", ""))
+        s = max(_title_match_score(query, text), _title_match_score(query, block_text))
+        title_context_bonus = 0.08 if _has_title_context_below(block, items) else 0.0
+        candidates.append(
+            {
+                "item": block,
+                "score": s,
+                "rank": s + title_context_bonus,
+                "index": idx,
+            }
+        )
+
+    candidates.sort(key=lambda entry: (-float(entry["rank"]), int(entry["index"])))
+    return candidates
+
+
+def _dedupe_title_candidates(candidates: list[dict]) -> list[dict]:
+    unique: list[dict] = []
+    seen = set()
+    for entry in candidates:
+        item = entry["item"]
+        rr = item.get("rect", {})
+        key = (
+            str(item.get("text", "")),
+            int(rr.get("x", 0)),
+            int(rr.get("y", 0)),
+            int(rr.get("width", 0)),
+            int(rr.get("height", 0)),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(entry)
+    return unique
+
+
+def _looks_like_cover_title_for_lower_title(
+    upper_item: dict,
+    lower_item: dict,
+    image_w: int,
+    image_h: int,
+) -> bool:
+    """Detect cover text duplicated by the real feed title below the cover."""
+
+    upper_rect = upper_item.get("rect", {})
+    lower_rect = lower_item.get("rect", {})
+    if int(lower_rect.get("y", 0)) <= int(upper_rect.get("y", 0)):
+        return False
+    if not _horizontally_related(upper_rect, lower_rect):
+        return False
+
+    lower_thumb = _infer_thumbnail_rect(lower_item, image_w, image_h)
+    if _center_in_rect(upper_rect, lower_thumb):
+        return True
+
+    upper_area = max(1, int(upper_rect.get("width", 0)) * int(upper_rect.get("height", 0)))
+    return _intersection_area(upper_rect, lower_thumb) >= upper_area * 0.35
+
+
+def pick_title_candidates_for_eye(
+    items: list,
+    query: str,
+    image_size: Tuple[int, int],
+) -> list[Tuple[dict, float]]:
+    """Return title candidates for feed-eye editing.
+
+    The normal title picker still returns the highest-ranked OCR text.  This
+    variant only changes ordering for the common duplicate case where the cover
+    itself contains title-like text and the real feed title appears below it:
+    try the lower title first, then fall back to the upper cover text.
+    """
+
+    candidates = _dedupe_title_candidates(_scored_title_candidates(items, query))
+    if not candidates:
+        raise RuntimeError("OCR 未识别到可作为标题的文本，请换截图或缩短/改写关键词")
+
+    best = candidates[0]
+    if float(best["score"]) < 0.35:
+        raise RuntimeError(
+            f"标题匹配度过低（{float(best['score']):.2f}），最接近的 OCR 文本是："
+            f"{best['item']['text']!r}"
+        )
+
+    image_w, image_h = image_size
+    paired: Optional[Tuple[dict, dict]] = None
+    for other in candidates[1:]:
+        if float(other["score"]) < max(0.35, float(best["score"]) - 0.35):
+            continue
+        if _looks_like_cover_title_for_lower_title(best["item"], other["item"], image_w, image_h):
+            paired = (other, best)
+            break
+        if _looks_like_cover_title_for_lower_title(other["item"], best["item"], image_w, image_h):
+            paired = (best, other)
+            break
+
+    ordered = [best]
+    if paired is not None:
+        lower, upper = paired
+        ordered = [lower, upper]
+
+    result: list[Tuple[dict, float]] = []
+    seen = set()
+    for entry in ordered:
+        item = entry["item"]
+        rr = item.get("rect", {})
+        key = (
+            str(item.get("text", "")),
+            int(rr.get("x", 0)),
+            int(rr.get("y", 0)),
+            int(rr.get("width", 0)),
+            int(rr.get("height", 0)),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((item, float(entry["score"])))
+    return result
 
 
 _VIEWS_PURE_NUMERIC = re.compile(r"^[0-9]+(?:\.[0-9]+)?万?$")
@@ -485,6 +624,7 @@ def _recognize_overlay_digit_boxes(
     comps: List[Tuple[int, Tuple[int, int, int, int]]],
     *,
     digit_min_x: int,
+    digit_center_y: Optional[float] = None,
 ) -> Optional[dict]:
     h, w = mask.shape
     digit_comps: List[Tuple[int, Tuple[int, int, int, int]]] = []
@@ -497,6 +637,11 @@ def _recognize_overlay_digit_boxes(
             continue
         if y0 > int(h * 0.76):
             continue
+        if digit_center_y is not None:
+            center_y = (y0 + y1) / 2.0
+            max_center_delta = max(5.0, h * 0.22)
+            if abs(center_y - float(digit_center_y)) > max_center_delta:
+                continue
         if bh < 5 or bw > 18 or area > 110:
             continue
         if bh <= 2 and bw >= 6:
@@ -509,9 +654,10 @@ def _recognize_overlay_digit_boxes(
 
     keep: List[Tuple[int, int, int, int]] = [digit_comps[0][1]]
     last = keep[-1]
+    max_digit_gap = max(4, int(round(h * 0.16)))
     for _area, box in digit_comps[1:]:
         gap = box[0] - last[2]
-        if gap > 4:
+        if gap > max_digit_gap:
             break
         if box[2] - keep[0][0] > 48:
             break
@@ -624,14 +770,21 @@ def _visual_overlay_item_from_roi(
             break
     eye_right = max((box[2] for _area, box in eye_like), default=max(10, int(w * 0.26)))
     anchor_center_y = None
+    digit_center_y = None
     if eye_like:
         _area, eye_box = max(eye_like, key=lambda item: item[0])
-        anchor_center_y = compact["y"] + (eye_box[1] + eye_box[3]) / 2.0
+        digit_center_y = (eye_box[1] + eye_box[3]) / 2.0
+        anchor_center_y = compact["y"] + digit_center_y
     digit_min_x = eye_right + 3
 
     best = None
     for mask, comps in masks:
-        recognized = _recognize_overlay_digit_boxes(mask, comps, digit_min_x=digit_min_x)
+        recognized = _recognize_overlay_digit_boxes(
+            mask,
+            comps,
+            digit_min_x=digit_min_x,
+            digit_center_y=digit_center_y,
+        )
         if recognized is None:
             continue
         text = str(recognized.get("text", ""))
@@ -644,6 +797,10 @@ def _visual_overlay_item_from_roi(
         if expected_digit_count is not None:
             if digit_len == expected_digit_count:
                 score += 0.70
+                if (by1 - by0) < max(7, int(round(h * 0.20))):
+                    score -= 0.65
+                if width < max(6, expected_digit_count * 4):
+                    score -= 0.35
             else:
                 score -= min(0.55, abs(digit_len - expected_digit_count) * 0.35)
         else:
@@ -949,6 +1106,37 @@ def choose_feed_overlay_views_for_slots(
     return result, None
 
 
+def find_eye_number_with_title_candidates(
+    image: Image.Image,
+    items: list,
+    title_candidates: list[Tuple[dict, float]],
+    *,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Tuple[dict, dict]:
+    last_error: Optional[RuntimeError] = None
+    for idx, (candidate, score) in enumerate(title_candidates):
+        if on_progress:
+            if len(title_candidates) > 1:
+                on_progress(
+                    f"标题候选 {idx + 1}/{len(title_candidates)} score={score:.2f} → "
+                    f"{candidate['text']!r}"
+                )
+            else:
+                on_progress(f"标题匹配 score={score:.2f} → {candidate['text']!r}")
+            on_progress("定位小眼睛数字…")
+        try:
+            view_item = find_card_eye_number_item(image, items, candidate)
+            return candidate, view_item
+        except RuntimeError as exc:
+            last_error = exc
+            if on_progress and idx + 1 < len(title_candidates):
+                on_progress("当前标题未定位到小眼睛，尝试备用标题…")
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("未能定位标题对应的小眼睛数字")
+
+
 def beautify_feed_card_eye(
     args: SimpleNamespace,
     *,
@@ -976,11 +1164,13 @@ def beautify_feed_card_eye(
     fallback_atlas = cli.build_glyph_atlas(source_image, items) if getattr(args, "glyph_atlas", False) else {}
 
     _prog("匹配标题…")
-    title_item, score = pick_best_title_item(items, title_query)
-    _prog(f"标题匹配 score={score:.2f} → {title_item['text']!r}")
-
-    _prog("定位小眼睛数字…")
-    view_item = find_card_eye_number_item(image, items, title_item)
+    title_candidates = pick_title_candidates_for_eye(items, title_query, image.size)
+    title_item, view_item = find_eye_number_with_title_candidates(
+        image,
+        items,
+        title_candidates,
+        on_progress=_prog,
+    )
     rect = dict(view_item["rect"])
     original_text = cli.normalize_metric_text(view_item["text"])
 
