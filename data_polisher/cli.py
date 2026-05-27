@@ -38,6 +38,10 @@ FEED_OVERLAY_VIEWS_DX = -2
 FEED_OVERLAY_VIEWS_DY = 1
 FEED_OVERLAY_VIEWS_ALPHA_GAIN = 1.0
 FEED_OVERLAY_VIEWS_ALPHA_GAMMA = 0.76
+FEED_OVERLAY_AA_TRIM_THRESHOLD = 128
+FEED_OVERLAY_AA_BLEND_STRENGTH = 0.5
+FEED_OVERLAY_SHARP_QUANT_STEP = 64
+FEED_OVERLAY_SHARP_QUANT_GAIN = 1.12
 
 _FONT_EXTRA = bundled_font_paths_in_order()
 
@@ -1645,6 +1649,94 @@ def candidate_masks(base_mask, style):
     return candidates
 
 
+def _feed_overlay_style_is_sharp(style) -> bool:
+    alpha = style.get("alpha_summary", {}) if isinstance(style, dict) else {}
+    p10 = float(alpha.get("p10", 0) or 0)
+    edge_ratio = float(style.get("edge_ratio", 0) or 0) if isinstance(style, dict) else 0.0
+    density = float(style.get("density", 0) or 0) if isinstance(style, dict) else 0.0
+    return p10 >= 200.0 and edge_ratio <= 0.24 and density <= 0.22
+
+
+def feed_overlay_antialias_params(style) -> Tuple[str, int, float]:
+    if _feed_overlay_style_is_sharp(style):
+        return "quantized", FEED_OVERLAY_SHARP_QUANT_STEP, FEED_OVERLAY_SHARP_QUANT_GAIN
+    return "aa", FEED_OVERLAY_AA_TRIM_THRESHOLD, FEED_OVERLAY_AA_BLEND_STRENGTH
+
+
+def feed_overlay_mask_from_variant(base_mask, style, variant_name: str, strength: float):
+    name = str(variant_name or "")
+    if name.startswith("hard"):
+        match = re.search(r"hard(\d+)", name)
+        threshold = int(match.group(1)) if match else 128
+        alpha_match = re.search(r"a(\d+)", name)
+        alpha = int(alpha_match.group(1)) if alpha_match else 255
+        return base_mask.point(lambda value, t=threshold, a=alpha: a if value >= t else 0)
+    if name.startswith("quantized"):
+        match = re.search(r"quantized(\d+)", name)
+        step = int(match.group(1)) if match else FEED_OVERLAY_SHARP_QUANT_STEP
+        gain = float(strength or 1.0)
+        return base_mask.point(
+            lambda value, s=step, g=gain: min(255, int(round(round(value / s) * s * g)))
+        )
+    if name.startswith("aa"):
+        match = re.search(r"aa(\d+)", name)
+        threshold = int(match.group(1)) if match else FEED_OVERLAY_AA_TRIM_THRESHOLD
+        trimmed = base_mask.point(lambda value, t=threshold: 0 if value < t else value)
+        if trimmed.getbbox() is None:
+            trimmed = base_mask
+        matched_mask = match_alpha_distribution(trimmed, style["alpha_values"])
+        return blend_masks(trimmed, matched_mask, float(strength))
+    return base_mask
+
+
+def overlay_candidate_masks(base_mask, style):
+    """Default tiny feed-overlay mask candidate for rendering fallback."""
+
+    mode, threshold, strength = feed_overlay_antialias_params(style)
+    if mode == "quantized":
+        variant = f"quantized{max(1, int(threshold))}"
+    else:
+        variant = f"aa{max(1, int(threshold))}"
+    return [(variant, strength, feed_overlay_mask_from_variant(base_mask, style, variant, strength))]
+
+
+def overlay_fit_candidate_masks(base_mask, style):
+    """Candidates used when fitting the original overlay digits.
+
+    The fitted candidate is later reused verbatim for the replacement text.
+    That keeps the visible style anchored to "how the old number looked" instead
+    of a geometric estimate derived from the replacement string.
+    """
+
+    specs: list[Tuple[str, float]] = [
+        ("base", 0.0),
+        ("hard128", 0.0),
+        ("quantized64", 1.0),
+        ("quantized64", 1.08),
+        ("quantized64", FEED_OVERLAY_SHARP_QUANT_GAIN),
+        ("quantized64", 1.18),
+        ("aa96", 0.5),
+        ("aa112", 0.5),
+        ("aa128", 0.25),
+        ("aa128", 0.5),
+        ("aa128", 0.75),
+        ("aa144", 0.25),
+        ("aa144", 0.5),
+        ("aa160", 0.5),
+        ("aa176", 0.5),
+    ]
+    seen = set()
+    candidates = []
+    for variant_name, strength in specs:
+        key = (variant_name, float(strength))
+        if key in seen:
+            continue
+        seen.add(key)
+        mask = feed_overlay_mask_from_variant(base_mask, style, variant_name, strength)
+        candidates.append((variant_name, strength, mask))
+    return candidates
+
+
 def calibrate_text_render(source_image, clean_image, ink_rect: Dict[str, int], original_text: str, style):
     target_patch_rect = expand_rect(
         ink_rect,
@@ -1748,19 +1840,8 @@ def calibrate_overlay_font_origin(
     """
 
     fp_cal = calibration.get("font_path", "") or ""
-    font_size = int(calibration.get("font_size", 0) or 0)
-    if not fp_cal or font_size <= 0 or not original_text:
-        return None
-    font = load_font_by_path(fp_cal, font_size)
-    if font is None:
-        font = load_font(font_size, "medium")
-
-    weight_cal = _weight_from_font_path(str(fp_cal) if fp_cal else None)
-    if _use_red_percent_hybrid(str(original_text), font=font, font_path_hint=str(fp_cal) if fp_cal else None):
-        bbox = rendered_ink_bbox_red_percent_split(str(original_text), font_size, weight_cal)
-    else:
-        bbox = rendered_ink_bbox(str(original_text), font)
-    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+    base_font_size = int(calibration.get("font_size", 0) or 0)
+    if not fp_cal or base_font_size <= 0 or not original_text:
         return None
 
     target_patch_rect = expand_rect(
@@ -1779,44 +1860,63 @@ def calibrate_overlay_font_origin(
     base_dx = int(calibration.get("dx", 0))
     base_dy = int(calibration.get("dy", 0))
     delta = max(4, int(round(max(1, int(ink_rect["height"])) * 0.45)))
+    ink_h = max(1, int(ink_rect["height"]))
+    size_min = max(8, min(base_font_size - 3, ink_h - 2))
+    size_max = min(48, max(base_font_size + 5, ink_h + 4))
 
     best = None
-    for dx in range(base_dx - delta, base_dx + delta + 1):
-        for dy in range(base_dy - delta, base_dy + delta + 1):
-            full_position = (
-                int(ink_rect["x"]) + dx - bbox[0],
-                int(ink_rect["y"]) + dy - bbox[1],
-            )
-            local_position = (
-                full_position[0] - target_patch_rect["x"],
-                full_position[1] - target_patch_rect["y"],
-            )
-            base_mask = text_mask_for_candidate(
-                target_patch.size,
-                str(original_text),
-                font,
-                local_position,
-                font_path_hint=str(fp_cal) if fp_cal else None,
-            )
-            for variant_name, strength, mask in candidate_masks(base_mask, style):
-                candidate_patch = composite_text_mask(clean_patch, mask, style["color"])
-                candidate_style = mask_style(mask)
-                score = patch_rmse(target_patch, candidate_patch) + style_distance(
-                    target_style,
-                    candidate_style,
-                ) * 8
-                if best is None or score < best["score"]:
-                    best = {
-                        "score": score,
-                        "rmse": patch_rmse(target_patch, candidate_patch),
-                        "position": full_position,
-                        "dx": dx,
-                        "dy": dy,
-                        "bbox": bbox,
-                        "edge_variant": variant_name,
-                        "alpha_match_strength": strength,
-                        "render_style": candidate_style,
-                    }
+    for font_size in range(size_min, size_max + 1):
+        font = load_font_by_path(fp_cal, font_size)
+        if font is None:
+            font = load_font(font_size, "medium")
+
+        weight_cal = _weight_from_font_path(str(fp_cal) if fp_cal else None)
+        if _use_red_percent_hybrid(str(original_text), font=font, font_path_hint=str(fp_cal) if fp_cal else None):
+            bbox = rendered_ink_bbox_red_percent_split(str(original_text), font_size, weight_cal)
+        else:
+            bbox = rendered_ink_bbox(str(original_text), font)
+        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            continue
+
+        rendered_h = bbox[3] - bbox[1]
+        if rendered_h > max(ink_h + 5, int(round(ink_h * 1.45))):
+            continue
+
+        for dx in range(base_dx - delta, base_dx + delta + 1):
+            for dy in range(base_dy - delta, base_dy + delta + 1):
+                full_position = (
+                    int(ink_rect["x"]) + dx - bbox[0],
+                    int(ink_rect["y"]) + dy - bbox[1],
+                )
+                local_position = (
+                    full_position[0] - target_patch_rect["x"],
+                    full_position[1] - target_patch_rect["y"],
+                )
+                base_mask = text_mask_for_candidate(
+                    target_patch.size,
+                    str(original_text),
+                    font,
+                    local_position,
+                    font_path_hint=str(fp_cal) if fp_cal else None,
+                )
+                for variant_name, strength, mask in overlay_fit_candidate_masks(base_mask, style):
+                    candidate_patch = composite_text_mask(clean_patch, mask, style["color"])
+                    candidate_style = mask_style(mask)
+                    rmse = patch_rmse(target_patch, candidate_patch)
+                    score = rmse + style_distance(target_style, candidate_style) * 3
+                    if best is None or score < best["score"]:
+                        best = {
+                            "score": score,
+                            "rmse": rmse,
+                            "font_size": font_size,
+                            "position": full_position,
+                            "dx": dx,
+                            "dy": dy,
+                            "bbox": bbox,
+                            "edge_variant": variant_name,
+                            "alpha_match_strength": strength,
+                            "render_style": candidate_style,
+                        }
 
     if best is None:
         return None
@@ -1863,6 +1963,23 @@ def draw_text_with_calibration(image, ink_rect: Dict[str, int], text: str, style
             gamma=float(calibration.get("overlay_alpha_gamma", 1.0)),
         )
         return composite_text_mask(image, mask, calibration.get("overlay_color", style["color"]))
+    if calibration.get("overlay_views_ink") and calibration.get("overlay_origin_edge_variant"):
+        variant = calibration["overlay_origin_edge_variant"]
+        strength = float(calibration.get("overlay_origin_alpha_match_strength", 0.0) or 0.0)
+        chosen_mask = feed_overlay_mask_from_variant(base_mask, style, variant, strength)
+        candidate_style = mask_style(chosen_mask)
+        calibration["new_edge_variant"] = variant
+        calibration["new_alpha_match_strength"] = strength
+        calibration["new_render_style"] = candidate_style
+        calibration["new_render_score"] = style_distance(
+            {
+                "density": style["density"],
+                "edge_ratio": style["edge_ratio"],
+                "alpha_summary": style["alpha_summary"],
+            },
+            candidate_style,
+        )
+        return composite_text_mask(image, chosen_mask, style["color"])
     target_style = {
         "density": style["density"],
         "edge_ratio": style["edge_ratio"],
@@ -1875,7 +1992,12 @@ def draw_text_with_calibration(image, ink_rect: Dict[str, int], text: str, style
         # Forced w1x-style masks bridge the two circles of ``%`` into a solid ink blob.
         forced_variant = None
         forced_strength = None
-    for variant_name, strength, mask in candidate_masks(base_mask, style):
+    mask_candidates = (
+        overlay_candidate_masks(base_mask, style)
+        if calibration.get("overlay_views_ink")
+        else candidate_masks(base_mask, style)
+    )
+    for variant_name, strength, mask in mask_candidates:
         if forced_variant and variant_name != forced_variant:
             continue
         if forced_strength is not None and strength != forced_strength:
@@ -1885,7 +2007,12 @@ def draw_text_with_calibration(image, ink_rect: Dict[str, int], text: str, style
         if best is None or score < best[0]:
             best = (score, variant_name, strength, mask, candidate_style)
     if best is None and forced_variant:
-        for variant_name, strength, mask in candidate_masks(base_mask, style):
+        fallback_candidates = (
+            overlay_candidate_masks(base_mask, style)
+            if calibration.get("overlay_views_ink")
+            else candidate_masks(base_mask, style)
+        )
+        for variant_name, strength, mask in fallback_candidates:
             candidate_style = mask_style(mask)
             score = style_distance(target_style, candidate_style)
             if best is None or score < best[0]:
@@ -2861,6 +2988,7 @@ def patch_ocr_rect_with_glyphs(
             calibration["overlay_alpha_gamma"] = effective_forced_font.get("overlay_alpha_gamma", 1.0)
             calibration["overlay_color"] = effective_forced_font.get("overlay_color", style.get("color", (255, 255, 255)))
     if overlay_views_ink:
+        calibration["overlay_views_ink"] = True
         origin_fit = calibrate_overlay_font_origin(
             source_image,
             image,
@@ -2870,6 +2998,12 @@ def patch_ocr_rect_with_glyphs(
             calibration,
         )
         if origin_fit is not None:
+            if origin_fit.get("font_size") and int(origin_fit["font_size"]) != int(calibration.get("font_size", 0) or 0):
+                calibration["overlay_fit_font_size_adjust"] = (
+                    int(calibration.get("font_size", 0) or 0),
+                    int(origin_fit["font_size"]),
+                )
+                calibration["font_size"] = int(origin_fit["font_size"])
             calibration["overlay_font_origin"] = origin_fit["position"]
             calibration["overlay_origin_source_text"] = str(original_text)
             calibration["overlay_origin_dx"] = origin_fit["dx"]

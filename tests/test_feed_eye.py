@@ -66,6 +66,43 @@ class FeedEyeTitlePickTests(unittest.TestCase):
         self.assertEqual(best["text"], "三城漫游|赴河，烟")
         self.assertGreater(score, 0.35)
 
+    def test_duplicate_cover_and_feed_title_candidates_try_lower_first(self):
+        items = [
+            {"text": "AI客服体验", "rect": {"x": 302, "y": 717, "width": 172, "height": 34}},
+            {"text": "升级，声网", "rect": {"x": 301, "y": 760, "width": 163, "height": 37}},
+            {"text": "助力服务提效", "rect": {"x": 304, "y": 805, "width": 190, "height": 31}},
+            {"text": "AI客服体验升级，声网助", "rect": {"x": 286, "y": 967, "width": 226, "height": 22}},
+            {"text": "力服务提效", "rect": {"x": 287, "y": 994, "width": 103, "height": 23}},
+        ]
+
+        candidates = feed_eye.pick_title_candidates_for_eye(items, "声网", (540, 1200))
+
+        self.assertGreaterEqual(len(candidates), 2)
+        self.assertEqual(candidates[0][0]["rect"]["y"], 967)
+        self.assertIn("声网", candidates[0][0]["text"])
+        self.assertEqual(candidates[1][0]["rect"]["y"], 717)
+
+    def test_title_candidate_lookup_falls_back_to_upper_when_lower_has_no_eye(self):
+        img = Image.new("RGB", (540, 1200), color=(255, 255, 255))
+        lower = {"text": "下方声网标题", "rect": {"x": 286, "y": 967, "width": 220, "height": 24}}
+        upper = {"text": "封面声网标题", "rect": {"x": 302, "y": 717, "width": 170, "height": 80}}
+        view_item = {"text": "23", "rect": {"x": 320, "y": 916, "width": 20, "height": 14}}
+
+        with patch(
+            "data_polisher.feed_eye.find_card_eye_number_item",
+            side_effect=[RuntimeError("miss"), view_item],
+        ) as mocked:
+            title, found = feed_eye.find_eye_number_with_title_candidates(
+                img,
+                [],
+                [(lower, 1.0), (upper, 0.98)],
+            )
+
+        self.assertIs(title, upper)
+        self.assertEqual(found, view_item)
+        self.assertIs(mocked.call_args_list[0].args[2], lower)
+        self.assertIs(mocked.call_args_list[1].args[2], upper)
+
     def test_raises_when_no_title_candidate(self):
         items = [{"text": "123", "rect": {"x": 0, "y": 0, "width": 1, "height": 1}}]
         with self.assertRaises(RuntimeError):

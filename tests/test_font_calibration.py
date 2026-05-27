@@ -92,6 +92,86 @@ class FontCalibrationTests(unittest.TestCase):
             self.assertLessEqual(bbox[3] - bbox[1], 12)
             self.assertLessEqual(bbox[2] - bbox[0], 18)
 
+    def test_feed_overlay_antialias_params_adapt_to_sharp_source_digits(self):
+        soft_style = {
+            "density": 0.253,
+            "edge_ratio": 0.30,
+            "alpha_summary": {"p10": 180, "p50": 246, "p90": 255},
+        }
+        sharp_style = {
+            "density": 0.138,
+            "edge_ratio": 0.19,
+            "alpha_summary": {"p10": 211, "p50": 252, "p90": 255},
+        }
+
+        soft_mode, soft_threshold, soft_strength = cli.feed_overlay_antialias_params(soft_style)
+        sharp_mode, sharp_threshold, sharp_strength = cli.feed_overlay_antialias_params(sharp_style)
+
+        self.assertEqual(soft_mode, "aa")
+        self.assertEqual(soft_threshold, cli.FEED_OVERLAY_AA_TRIM_THRESHOLD)
+        self.assertEqual(soft_strength, cli.FEED_OVERLAY_AA_BLEND_STRENGTH)
+        self.assertEqual(sharp_mode, "quantized")
+        self.assertEqual(sharp_threshold, cli.FEED_OVERLAY_SHARP_QUANT_STEP)
+        self.assertEqual(sharp_strength, cli.FEED_OVERLAY_SHARP_QUANT_GAIN)
+
+    def test_feed_overlay_calibrates_font_size_by_recreating_source_digits(self):
+        if not cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT.is_file():
+            self.skipTest("bundled feed overlay font missing")
+
+        font14 = cli.load_font_by_path(str(cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT), 14)
+        background = Image.new("RGB", (100, 60), (144, 168, 167))
+        origin = (24, 20)
+        base_mask = cli.text_mask_for_candidate(
+            background.size,
+            "16",
+            font14,
+            origin,
+            font_path_hint=str(cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT),
+        )
+        source_mask = cli.feed_overlay_mask_from_variant(
+            base_mask,
+            {"alpha_values": [255]},
+            "quantized64",
+            cli.FEED_OVERLAY_SHARP_QUANT_GAIN,
+        )
+        source = cli.composite_text_mask(background, source_mask, (255, 255, 255))
+        bbox = source_mask.getbbox()
+        rect = {"x": bbox[0], "y": bbox[1], "width": bbox[2] - bbox[0], "height": bbox[3] - bbox[1]}
+        forced = {
+            "font_size": 13,
+            "font_path": str(cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT),
+            "font_match": {"synthetic_initial_estimate": True},
+            "overlay_visual_dx": 0,
+            "overlay_visual_dy": 0,
+            "overlay_alpha_gain": 1.0,
+            "overlay_alpha_gamma": 1.0,
+            "overlay_color": (255, 255, 255),
+        }
+
+        _image, report = cli.patch_ocr_rect_with_glyphs(
+            source.copy(),
+            source,
+            rect,
+            "38",
+            None,
+            "16",
+            raw_text="16",
+            forced_font=forced,
+            overlay_use_input_rect=True,
+            overlay_erase_rect=rect,
+            overlay_views_ink=True,
+        )
+
+        calibration = report["calibration"]
+        self.assertEqual(calibration["font_size"], 14)
+        self.assertEqual(calibration["overlay_fit_font_size_adjust"], (13, 14))
+        self.assertLess(calibration["overlay_origin_rmse"], 12)
+        self.assertEqual(calibration["new_edge_variant"], calibration["overlay_origin_edge_variant"])
+        self.assertEqual(
+            calibration["new_alpha_match_strength"],
+            calibration["overlay_origin_alpha_match_strength"],
+        )
+
     def test_feed_overlay_reuses_origin_edge_style_and_left_bearing(self):
         if not cli.BUNDLED_FEED_OVERLAY_VIEWS_FONT.is_file():
             self.skipTest("bundled feed overlay font missing")
@@ -130,6 +210,11 @@ class FontCalibrationTests(unittest.TestCase):
         self.assertEqual(
             calibration["overlay_new_font_origin"][0],
             calibration["overlay_font_origin"][0] + calibration["overlay_origin_bbox"][0] - new_bbox[0],
+        )
+        self.assertEqual(calibration["new_edge_variant"], calibration["overlay_origin_edge_variant"])
+        self.assertEqual(
+            calibration["new_alpha_match_strength"],
+            calibration["overlay_origin_alpha_match_strength"],
         )
 
     def test_feed_overlay_stroke_erase_removes_antialias_halo(self):

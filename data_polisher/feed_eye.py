@@ -175,6 +175,135 @@ def pick_best_title_item(items: list, query: str):
     return best, best_score
 
 
+def _scored_title_candidates(items: list, query: str) -> list[dict]:
+    if not query.strip():
+        raise ValueError("标题关键词不能为空")
+
+    candidates: list[dict] = []
+    for idx, item in enumerate(items):
+        text = str(item.get("text", ""))
+        if not _is_title_like(text):
+            continue
+        block = _merge_previous_title_lines(item, items)
+        block_text = str(block.get("text", ""))
+        s = max(_title_match_score(query, text), _title_match_score(query, block_text))
+        title_context_bonus = 0.08 if _has_title_context_below(block, items) else 0.0
+        candidates.append(
+            {
+                "item": block,
+                "score": s,
+                "rank": s + title_context_bonus,
+                "index": idx,
+            }
+        )
+
+    candidates.sort(key=lambda entry: (-float(entry["rank"]), int(entry["index"])))
+    return candidates
+
+
+def _dedupe_title_candidates(candidates: list[dict]) -> list[dict]:
+    unique: list[dict] = []
+    seen = set()
+    for entry in candidates:
+        item = entry["item"]
+        rr = item.get("rect", {})
+        key = (
+            str(item.get("text", "")),
+            int(rr.get("x", 0)),
+            int(rr.get("y", 0)),
+            int(rr.get("width", 0)),
+            int(rr.get("height", 0)),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(entry)
+    return unique
+
+
+def _looks_like_cover_title_for_lower_title(
+    upper_item: dict,
+    lower_item: dict,
+    image_w: int,
+    image_h: int,
+) -> bool:
+    """Detect cover text duplicated by the real feed title below the cover."""
+
+    upper_rect = upper_item.get("rect", {})
+    lower_rect = lower_item.get("rect", {})
+    if int(lower_rect.get("y", 0)) <= int(upper_rect.get("y", 0)):
+        return False
+    if not _horizontally_related(upper_rect, lower_rect):
+        return False
+
+    lower_thumb = _infer_thumbnail_rect(lower_item, image_w, image_h)
+    if _center_in_rect(upper_rect, lower_thumb):
+        return True
+
+    upper_area = max(1, int(upper_rect.get("width", 0)) * int(upper_rect.get("height", 0)))
+    return _intersection_area(upper_rect, lower_thumb) >= upper_area * 0.35
+
+
+def pick_title_candidates_for_eye(
+    items: list,
+    query: str,
+    image_size: Tuple[int, int],
+) -> list[Tuple[dict, float]]:
+    """Return title candidates for feed-eye editing.
+
+    The normal title picker still returns the highest-ranked OCR text.  This
+    variant only changes ordering for the common duplicate case where the cover
+    itself contains title-like text and the real feed title appears below it:
+    try the lower title first, then fall back to the upper cover text.
+    """
+
+    candidates = _dedupe_title_candidates(_scored_title_candidates(items, query))
+    if not candidates:
+        raise RuntimeError("OCR 未识别到可作为标题的文本，请换截图或缩短/改写关键词")
+
+    best = candidates[0]
+    if float(best["score"]) < 0.35:
+        raise RuntimeError(
+            f"标题匹配度过低（{float(best['score']):.2f}），最接近的 OCR 文本是："
+            f"{best['item']['text']!r}"
+        )
+
+    image_w, image_h = image_size
+    paired: Optional[Tuple[dict, dict]] = None
+    for other in candidates[1:]:
+        if float(other["score"]) < max(0.35, float(best["score"]) - 0.35):
+            continue
+        if _looks_like_cover_title_for_lower_title(best["item"], other["item"], image_w, image_h):
+            paired = (other, best)
+            break
+        if _looks_like_cover_title_for_lower_title(other["item"], best["item"], image_w, image_h):
+            paired = (best, other)
+            break
+
+    ordered = [best]
+    if paired is not None:
+        lower, upper = paired
+        ordered = [lower, upper]
+
+    result: list[Tuple[dict, float]] = []
+    seen = set()
+    for entry in ordered:
+        item = entry["item"]
+        rr = item.get("rect", {})
+        key = (
+            str(item.get("text", "")),
+            int(rr.get("x", 0)),
+            int(rr.get("y", 0)),
+            int(rr.get("width", 0)),
+            int(rr.get("height", 0)),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((item, float(entry["score"])))
+    return result
+
+
 _VIEWS_PURE_NUMERIC = re.compile(r"^[0-9]+(?:\.[0-9]+)?万?$")
 
 
@@ -977,6 +1106,37 @@ def choose_feed_overlay_views_for_slots(
     return result, None
 
 
+def find_eye_number_with_title_candidates(
+    image: Image.Image,
+    items: list,
+    title_candidates: list[Tuple[dict, float]],
+    *,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Tuple[dict, dict]:
+    last_error: Optional[RuntimeError] = None
+    for idx, (candidate, score) in enumerate(title_candidates):
+        if on_progress:
+            if len(title_candidates) > 1:
+                on_progress(
+                    f"标题候选 {idx + 1}/{len(title_candidates)} score={score:.2f} → "
+                    f"{candidate['text']!r}"
+                )
+            else:
+                on_progress(f"标题匹配 score={score:.2f} → {candidate['text']!r}")
+            on_progress("定位小眼睛数字…")
+        try:
+            view_item = find_card_eye_number_item(image, items, candidate)
+            return candidate, view_item
+        except RuntimeError as exc:
+            last_error = exc
+            if on_progress and idx + 1 < len(title_candidates):
+                on_progress("当前标题未定位到小眼睛，尝试备用标题…")
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("未能定位标题对应的小眼睛数字")
+
+
 def beautify_feed_card_eye(
     args: SimpleNamespace,
     *,
@@ -1004,11 +1164,13 @@ def beautify_feed_card_eye(
     fallback_atlas = cli.build_glyph_atlas(source_image, items) if getattr(args, "glyph_atlas", False) else {}
 
     _prog("匹配标题…")
-    title_item, score = pick_best_title_item(items, title_query)
-    _prog(f"标题匹配 score={score:.2f} → {title_item['text']!r}")
-
-    _prog("定位小眼睛数字…")
-    view_item = find_card_eye_number_item(image, items, title_item)
+    title_candidates = pick_title_candidates_for_eye(items, title_query, image.size)
+    title_item, view_item = find_eye_number_with_title_candidates(
+        image,
+        items,
+        title_candidates,
+        on_progress=_prog,
+    )
     rect = dict(view_item["rect"])
     original_text = cli.normalize_metric_text(view_item["text"])
 
